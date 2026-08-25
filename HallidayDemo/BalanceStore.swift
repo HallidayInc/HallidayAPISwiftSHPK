@@ -1,0 +1,104 @@
+import Foundation
+import Observation
+
+struct TokenBalance: Identifiable {
+    let id: String
+    let chain: String
+    let symbol: String
+    let imageURL: URL?
+    let amount: Decimal
+    let usd: Decimal
+    let decimals: Int
+    let address: String
+    // Present in Halliday's curated asset list; anything else is unrecognised or spam.
+    let supported: Bool
+
+    var unitPrice: Decimal? {
+        amount > 0 ? usd / amount : nil
+    }
+}
+
+@MainActor
+@Observable
+final class BalanceStore {
+    var all: [TokenBalance] = []
+
+    func rows(showAll: Bool) -> [TokenBalance] {
+        showAll ? all : all.filter(\.supported)
+    }
+
+    func nativeAmount(chain: String) -> Decimal {
+        all.first { $0.chain == chain && $0.address.lowercased() == "0x" }?.amount ?? 0
+    }
+
+
+
+    func refresh(wallet: Wallet, assets: AssetStore) async {
+        struct Row: Decodable {
+            let chain: String
+            let address: String
+            let symbol: String
+            let amount: String
+            let usd: String
+            let logo: URL?
+            let decimals: Int?
+        }
+        struct SourceError: Decodable {
+            let source: String
+            let message: String
+        }
+        struct Response: Decodable {
+            let balances: [Row]
+            let errors: [SourceError]
+        }
+
+        guard !Config.serverURL.isEmpty else {
+            Toast.shared.show("SERVER_URL is not set. Add it in Product → Scheme → Edit Scheme → Run → Arguments.")
+            return
+        }
+        var components = URLComponents(string: Config.serverURL + "/balances")
+        components?.queryItems = [
+            URLQueryItem(name: "evm", value: wallet.address(.evm)),
+            URLQueryItem(name: "solana", value: wallet.address(.solana)),
+            URLQueryItem(name: "bitcoin", value: wallet.address(.bitcoin)),
+            URLQueryItem(name: "tron", value: wallet.address(.tron)),
+        ]
+        guard let url = components?.url else {
+            Toast.shared.show("SERVER_URL is not a valid URL: \(Config.serverURL)")
+            return
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard (200..<300).contains(code) else {
+                Toast.shared.show("Balance server \(code): \(String(data: data, encoding: .utf8) ?? "")")
+                return
+            }
+            let payload = try JSONDecoder().decode(Response.self, from: data)
+            for failure in payload.errors {
+                Toast.shared.show("\(failure.source): \(failure.message)")
+            }
+            all = payload.balances.compactMap { row in
+                guard let amount = Decimal(string: row.amount), amount > 0 else { return nil }
+                let known = assets.tokens.first {
+                    $0.chain == row.chain && $0.address.caseInsensitiveCompare(row.address) == .orderedSame
+                }
+                return TokenBalance(
+                    id: "\(row.chain):\(row.address)",
+                    chain: row.chain,
+                    symbol: row.symbol,
+                    imageURL: known?.imageURL ?? row.logo,
+                    amount: amount,
+                    usd: Decimal(string: row.usd) ?? 0,
+                    decimals: row.decimals ?? known?.decimals ?? 18,
+                    address: row.address,
+                    supported: known != nil
+                )
+            }
+            await assets.cacheIcons(all.compactMap(\.imageURL))
+        } catch {
+            Toast.shared.report(error)
+        }
+    }
+}

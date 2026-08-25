@@ -1,0 +1,6 @@
+// Copy to Signing.xcconfig and fill in. That file is gitignored.
+// DEVELOPMENT_TEAM is the 10-character Team ID from
+// https://developer.apple.com/account under Membership details.
+
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+PRODUCT_BUNDLE_IDENTIFIER = com.example.HallidayDemo
