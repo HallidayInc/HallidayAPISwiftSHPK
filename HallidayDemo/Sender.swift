@@ -18,10 +18,9 @@ enum SendError: LocalizedError {
 // Funds a Halliday payment from the app's own wallet. Withdrawals need this because the
 // deposit address Halliday returns has to be paid by us, not by an external wallet.
 enum Sender {
-    // Fallbacks only. Gas is estimated per transaction: EIP-2780 proposes changing the
-    // intrinsic 21,000 cost, so assuming it is not safe.
-    private static let nativeGas = "21000"
-    private static let tokenGas = "150000"
+    // Gas is always estimated, never assumed. EIP-2780 proposes changing the intrinsic
+    // 21,000 cost, and Tempo already charges over 274,000 for a bare transfer, so a wrong
+    // constant would sign a transaction that runs out of gas and burns the fee.
     private static let gasHeadroom = Decimal(string: "1.25")!
 
     static func fund(deposit: DepositInfo, token: Token, wallet: Wallet, chain: ChainInfo) async throws -> String {
@@ -45,32 +44,68 @@ enum Sender {
         chain: ChainInfo,
         chainName: String
     ) async throws -> String {
-        guard chain.family == .evm, let rpcURL = chain.rpc, let chainId = chain.chainId?.value else {
+        switch chain.family {
+        case .solana:
+            return try await SolanaSender.send(
+                to: recipient, amount: rawAmount, tokenAddress: tokenAddress,
+                decimals: decimals, wallet: wallet
+            )
+        case .tron:
+            return try await TronSender.send(
+                to: recipient, amount: rawAmount, tokenAddress: tokenAddress,
+                decimals: decimals, wallet: wallet
+            )
+        case .bitcoin:
+            return try await BitcoinSender.send(
+                to: recipient, amount: rawAmount, decimals: decimals, wallet: wallet
+            )
+        case .evm:
+            return try await sendEVM(
+                to: recipient, amount: rawAmount, tokenAddress: tokenAddress,
+                decimals: decimals, wallet: wallet, chain: chain, chainName: chainName
+            )
+        case nil:
+            throw SendError.unsupported(chainName)
+        }
+    }
+
+    private static func sendEVM(
+        to recipient: String,
+        amount rawAmount: String,
+        tokenAddress: String,
+        decimals: Int,
+        wallet: Wallet,
+        chain: ChainInfo,
+        chainName: String
+    ) async throws -> String {
+        guard let rpcURL = chain.rpc, let chainId = chain.chainId?.value else {
             throw SendError.unsupported(chainName)
         }
 
         let from = wallet.address(.evm)
         let key = HDWallet(mnemonic: wallet.mnemonic, passphrase: "")!.getKeyForCoin(coin: .ethereum)
         let isNative = tokenAddress.lowercased() == "0x"
-        let amount = baseUnits(rawAmount, decimals: decimals)
+        let amount = Units.bytes(rawAmount, decimals: decimals)
 
         async let nonceHex = call(rpcURL, "eth_getTransactionCount", [from, "pending"])
         async let gasPriceHex = call(rpcURL, "eth_gasPrice", [])
 
         let callData = isNative ? nil : erc20TransferData(to: recipient, amount: amount)
-        let gasLimit = await estimatedGas(
+        let gasLimit = try await estimatedGas(
             rpcURL,
             from: from,
             to: isNative ? recipient : tokenAddress,
             value: isNative ? "0x" + hex(amount) : nil,
-            data: callData,
-            fallback: isNative ? nativeGas : tokenGas
+            data: callData
         )
 
         var input = EthereumSigningInput()
         input.chainID = bytes(decimal: chainId)
         input.nonce = bytes(hex: try await nonceHex)
-        input.gasPrice = bytes(hex: try await gasPriceHex)
+        // A legacy transaction's gas price is also its maximum fee, and on an EIP-1559 chain
+        // eth_gasPrice can come back at exactly the base fee. Base fee can climb 12.5% in a
+        // block, so bidding it exactly leaves the transaction stuck until it falls back.
+        input.gasPrice = withHeadroom(number(hex: try await gasPriceHex))
         input.gasLimit = gasLimit
         input.privateKey = key.data
         input.txMode = .legacy
@@ -93,10 +128,43 @@ enum Sender {
         return try await call(rpcURL, "eth_sendRawTransaction", ["0x" + hex(signed.encoded)])
     }
 
-    // What this transfer will cost in gas coin, so "Max" can hold it back and the review
-    // screen can refuse a send the wallet cannot pay for. Zero means the estimate failed.
-    static func fee(chain: ChainInfo, from: String, tokenAddress: String) async -> Decimal {
-        guard chain.family == .evm, let rpc = chain.rpc else { return 0 }
+    // Solana charges a flat 5,000 lamports per signature.
+    private static let lamportsPerSignature = Decimal(5000)
+
+    // What this transfer will cost in the chain's own coin, so "Max" can hold it back and
+    // the review screen can refuse a send the wallet cannot pay for. Zero means either that
+    // the transfer is free or that the estimate failed; both leave the amount untouched.
+    static func fee(chain: ChainInfo, wallet: Wallet, tokenAddress: String) async -> Decimal {
+        guard let family = chain.family else { return 0 }
+        let from = wallet.address(family)
+        switch family {
+        case .evm: return await evmFee(chain: chain, from: from, tokenAddress: tokenAddress)
+        case .solana: return lamportsPerSignature * Decimal(sign: .plus, exponent: -9, significand: 1)
+        case .bitcoin: return await bitcoinFee(from: from)
+        case .tron: return await tronFee(from: from)
+        }
+    }
+
+    // Every input has to be signed, so sweeping a wallet with many small UTXOs costs more
+    // than one with a single large one. Sizes are for the P2WPKH inputs WalletCore derives.
+    private static func bitcoinFee(from: String) async -> Decimal {
+        guard let response = try? await Proxy.get("/bitcoin/utxos", ["address": from]),
+              let rows = response["utxos"] as? [[String: Any]], !rows.isEmpty,
+              let perByte = (response["feePerByte"] as? NSNumber)?.intValue
+        else { return 0 }
+        let size = 11 + 68 * rows.count + 31
+        return Decimal(size * perByte) * Decimal(sign: .plus, exponent: -8, significand: 1)
+    }
+
+    private static func tronFee(from: String) async -> Decimal {
+        guard let response = try? await Proxy.get("/tron/resource", ["address": from]),
+              let sun = (response["sun"] as? NSNumber)?.intValue
+        else { return 0 }
+        return Decimal(sun) * Decimal(sign: .plus, exponent: -6, significand: 1)
+    }
+
+    private static func evmFee(chain: ChainInfo, from: String, tokenAddress: String) async -> Decimal {
+        guard let rpc = chain.rpc else { return 0 }
         let isNative = tokenAddress.lowercased() == "0x"
         // A one-unit transfer back to the sender stands in for the real one: the recipient
         // and amount are not known yet, and neither changes the gas materially.
@@ -106,8 +174,8 @@ enum Sender {
 
         async let priceHex = try? call(rpc, "eth_gasPrice", [])
         async let gasHex = try? call(rpc, "eth_estimateGas", [probe])
-        guard let price = await priceHex.map(number(hex:)) else { return 0 }
-        let gas = await gasHex.map(number(hex:)) ?? Decimal(string: isNative ? nativeGas : tokenGas)!
+        guard let price = await priceHex.map(number(hex:)),
+              let gas = await gasHex.map(number(hex:)) else { return 0 }
         let wei = price * gas * gasHeadroom
         return wei * Decimal(sign: .plus, exponent: -18, significand: 1)
     }
@@ -117,18 +185,18 @@ enum Sender {
         from: String,
         to: String,
         value: String?,
-        data: String?,
-        fallback: String
-    ) async -> Data {
+        data: String?
+    ) async throws -> Data {
         var tx: [String: Any] = ["from": from, "to": to]
         if let value { tx["value"] = value }
         if let data { tx["data"] = data }
-        guard let hexResult = try? await call(url, "eth_estimateGas", [tx]) else {
-            return bytes(decimal: fallback)
-        }
+        return withHeadroom(number(hex: try await call(url, "eth_estimateGas", [tx])))
+    }
+
+    private static func withHeadroom(_ value: Decimal) -> Data {
         var padded = Decimal()
-        var estimate = number(hex: hexResult) * gasHeadroom
-        NSDecimalRound(&padded, &estimate, 0, .up)
+        var raised = value * gasHeadroom
+        NSDecimalRound(&padded, &raised, 0, .up)
         return bytes(decimal: NSDecimalNumber(decimal: padded).stringValue)
     }
 
@@ -166,16 +234,6 @@ enum Sender {
             throw SendError.rpc(method, String(data: data, encoding: .utf8) ?? "no result")
         }
         return result
-    }
-
-    // Protobuf wants minimal big-endian bytes, so amounts are converted by long division
-    // rather than through a fixed-width integer that 18 decimals would overflow.
-    private static func baseUnits(_ amount: String, decimals: Int) -> Data {
-        let value = Decimal(string: amount) ?? 0
-        var scaled = value * Decimal(sign: .plus, exponent: decimals, significand: 1)
-        var whole = Decimal()
-        NSDecimalRound(&whole, &scaled, 0, .down)
-        return bytes(decimal: NSDecimalNumber(decimal: whole).stringValue)
     }
 
     private static func bytes(decimal text: String) -> Data {

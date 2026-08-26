@@ -113,7 +113,7 @@ struct AmountView: View {
 
             if overBalance {
                 Text(flow.gasBuffer > 0
-                     ? "More than your \(symbol) balance after gas."
+                     ? "More than your \(symbol) balance after fees."
                      : "More than your \(symbol) balance.")
                     .haffer(13, .regular)
                     .foregroundStyle(.secondary)

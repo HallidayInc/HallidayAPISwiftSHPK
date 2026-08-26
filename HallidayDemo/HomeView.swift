@@ -6,6 +6,8 @@ struct HomeView: View {
     @Environment(AssetStore.self) private var assets
     @State private var balances = BalanceStore()
     @State private var showSettings = false
+    @State private var showHistory = false
+    @State private var history = HistoryStore()
     @State private var showDeposit = false
     @State private var showWithdraw = false
     @State private var showSwap = false
@@ -20,8 +22,20 @@ struct HomeView: View {
 
     private var filtered: [TokenBalance] {
         let rows = balances.rows(showAll: showAllTokens)
-        guard let chain else { return rows }
-        return rows.filter { $0.chain == chain }
+        guard let chain else { return Self.byNetwork(rows) }
+        return Self.byNetwork(rows.filter { $0.chain == chain })
+    }
+
+    // Every token on a network sits together, networks ranked by what they hold, and each
+    // network's tokens in the usual pinned-then-alphabetical order.
+    private static func byNetwork(_ rows: [TokenBalance]) -> [TokenBalance] {
+        let byChain = Dictionary(grouping: rows, by: \.chain)
+        let totals = byChain.mapValues { $0.reduce(0) { $0 + $1.usd } }
+        let order = byChain.keys.sorted {
+            let left = totals[$0] ?? 0, right = totals[$1] ?? 0
+            return left == right ? $0 < $1 : left > right
+        }
+        return order.flatMap { Preferred.sort(byChain[$0] ?? [], pinned: Preferred.tokens, by: \.symbol) }
     }
 
     var body: some View {
@@ -87,6 +101,8 @@ struct HomeView: View {
                     }
                     .listRowInsets(EdgeInsets(top: 14, leading: 0, bottom: 14, trailing: 0))
                     .listRowSeparatorTint(Color.hairline)
+                    // The hairline above the list already divides it from the picker.
+                    .listRowSeparator(balance.id == filtered.first?.id ? .hidden : .visible, edges: .top)
                 }
                 .listStyle(.plain)
                 .overlay {
@@ -98,7 +114,14 @@ struct HomeView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .navBar(leading: .menu, onLeading: { showSettings = true })
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    NavButton(glyph: .menu) { showSettings = true }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavButton(glyph: .notify, dot: !history.attention.isEmpty) { showHistory = true }
+                }
+            }
             .fullScreenCover(isPresented: $showSettings, onDismiss: refresh) {
                 SettingsView()
             }
@@ -123,6 +146,11 @@ struct HomeView: View {
                     ReceiveView(wallet: wallet).environment(assets)
                 }
             }
+            .fullScreenCover(isPresented: $showHistory, onDismiss: refresh) {
+                if let wallet = store.selected {
+                    HistoryView(wallet: wallet, history: history).environment(assets)
+                }
+            }
             .fullScreenCover(isPresented: $showChains) {
                 ChainFilterView(chain: $chain).environment(assets)
             }
@@ -131,7 +159,13 @@ struct HomeView: View {
                     DepositView(wallet: wallet, assets: assets, balances: balances, mode: .swap)
                 }
             }
-            .task { refresh() }
+            .task {
+                refresh()
+                guard let wallet = store.selected else { return }
+                history.prime(wallet: wallet)
+                await history.refreshHead()
+                await history.poll()
+            }
         }
         .toasts()
     }

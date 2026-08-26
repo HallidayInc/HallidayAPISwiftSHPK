@@ -48,12 +48,12 @@ final class SendFlow {
     }
 
     var gasShortfall: String? {
-        guard let selected, family == .evm, gasFee > 0 else { return nil }
+        guard let selected, gasFee > 0 else { return nil }
         let held = isNative ? selected.amount : balances.nativeAmount(chain: selected.chain)
         let needed = isNative ? gasFee + (Decimal(string: amount) ?? 0) : gasFee
-        guard held < needed else { return nil }
-        let symbol = assets.gasTokens[selected.chain]?.symbol ?? "gas"
-        return "You need more \(symbol) on \(selected.chain.capitalized) to pay for gas."
+        // Some chains list no coin of their own, and then there is no balance to check against.
+        guard let symbol = assets.gasTokens[selected.chain]?.symbol, held < needed else { return nil }
+        return "You need more \(symbol) on \(selected.chain.capitalized) to cover the network fee."
     }
 
     // Only what the wallet actually holds, grouped by symbol when the token is recognised.
@@ -91,13 +91,12 @@ final class SendFlow {
         gasFee = 0
         path = [.amount]
         guard let chain = assets.chains[balance.chain] else { return }
-        let from = wallet.address(.evm)
-        Task { gasFee = await Sender.fee(chain: chain, from: from, tokenAddress: balance.address) }
+        Task { gasFee = await Sender.fee(chain: chain, wallet: wallet, tokenAddress: balance.address) }
     }
 
-    private var isNative: Bool { selected?.address.lowercased() == "0x" }
+    private var isNative: Bool { Native.matches(selected?.address ?? "") }
 
-    // Only a native send competes with its own gas; an ERC-20 pays it from a separate balance.
+    // Only a native send competes with its own fee; a token pays it from a separate balance.
     var gasBuffer: Decimal { isNative ? gasFee : 0 }
 
     var maxSendable: Decimal {

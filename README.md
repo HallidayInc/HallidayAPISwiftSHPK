@@ -75,11 +75,14 @@ reads `decimals()` off the contract and caches the answer for a day, since it ne
 | Provider | Chains |
 |---|---|
 | Alchemy Data API | arbitrum, avalanche, base, bsc, ethereum, hyperevm, monad, optimism, polygon, robinhood, solana, unichain, world |
+| Alchemy RPC | megaeth, pharos, stable, tempo |
 | BlockCypher | bitcoin |
 | TronGrid | tron (TRX + known TRC-20) |
-| Lighter | lighter |
 
-Not covered: `megaeth`, `pharos`, `stable`.
+All 19 allowlisted chains are covered. The Data API does not index megaeth, pharos, stable, or
+tempo, so those four are read one asset at a time instead — `eth_getBalance` for the native coin
+and `balanceOf` for each token Halliday lists on that chain. That is only viable because the
+lists are short (8, 3, 3, and 5).
 
 Responses are cached for 15s and identical in-flight requests are coalesced, so twenty
 simultaneous calls produce one upstream fetch. Alchemy paging stops at 5 pages and the response
@@ -119,21 +122,52 @@ with the wallet's EVM key and resubmits automatically — the user never sees it
 The cash onramp opens Halliday's `funding_page_url` in an `SFSafariViewController` rather than a
 `WKWebView`, because only the former supports Apple Pay on the Web.
 
-## Gas
+## Network fees
 
-Withdraw, swap, and send broadcast from the wallet, so they need the chain's gas coin. Deposit
-does not — it is paid from outside.
+Withdraw, swap, and send broadcast from the wallet, so they need the chain's own coin to pay
+the fee. Deposit does not — it is paid from outside.
 
-Gas is estimated per transaction with `eth_estimateGas` instead of assuming 21,000, both because
-an ERC-20 transfer costs several times that and because [EIP-2780](https://eips.ethereum.org/EIPS/eip-2780)
-proposes changing the intrinsic cost. The estimate is padded 25%.
+"Max" holds the fee back when the asset being spent is the chain's own coin. The review screen
+blocks the action and explains why when the wallet cannot cover it — for a native send that
+means `balance < fee + amount`, for a token it means the native balance is short. A failed
+estimate returns zero, which leaves the amount untouched rather than blocking the screen.
 
-"Max" holds that estimate back when the asset being spent is the gas coin itself. The review
-screen blocks the action and explains why when the wallet cannot cover the fee — for a native
-send that means `balance < fee + amount`, for a token it means the native balance is short.
+Each family computes that fee differently:
 
-Only EVM chains can be sent from. Bitcoin, Solana, and Tron balances display but their sends
-throw `SendError.unsupported`.
+| Family | Fee |
+|---|---|
+| EVM | `eth_gasPrice` × `eth_estimateGas`, padded 25% |
+| Bitcoin | fee-rate × estimated vbytes, which grows with the number of UTXOs being swept |
+| Solana | flat 5,000 lamports per signature |
+| Tron | bandwidth beyond the free daily allowance, at 1,000 sun/byte — usually zero |
+
+EVM gas is estimated per transaction rather than assuming 21,000, both because an ERC-20
+transfer costs several times that and because [EIP-2780](https://eips.ethereum.org/EIPS/eip-2780)
+proposes changing the intrinsic cost.
+
+## Sending
+
+All four families can send. Signing happens in the app with WalletCore; the chain data each
+signer needs comes from `server/`, because it sits behind provider keys.
+
+Every allowlisted chain can send and receive.
+
+**Tempo** is the one chain with no coin of its own in Halliday's asset list — it settles in
+stablecoins, and its nominal native currency is `USD`. The fee check is skipped where no such
+coin is known rather than comparing against a balance that is always zero, so a Tempo send is
+never blocked by a fee it cannot measure.
+
+| Family | Needs | Notes |
+|---|---|---|
+| EVM | nonce, gas price, gas estimate | ERC-20 transfers go to the contract with the recipient in calldata |
+| Solana | a recent blockhash | SPL sends create the recipient's token account when it does not exist, at the sender's expense |
+| Tron | a recent block reference | Transactions expire 10 minutes after that block; TRC-20 carries a 100 TRX fee limit |
+| Bitcoin | unspent outputs, fee rate | `AnySigner.plan` does coin selection and the change output |
+
+Watch out for how each source names a chain's own coin: the balance proxy uses `0x` everywhere,
+while Halliday's asset list gives a mint for Solana and `bc1` for Bitcoin. `Native.matches`
+is the single test for this. Solana's `So1…112` is WSOL, a real SPL token, and must not be
+treated as native.
 
 ## Dependencies
 

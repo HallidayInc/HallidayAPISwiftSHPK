@@ -37,6 +37,8 @@ extension Color {
             : .black
     })
     static let card = Color(.secondarySystemBackground)
+    // The notification badge, per the spec's red dot.
+    static let badge = Color(red: 0.94, green: 0.18, blue: 0.18)
 
     private static func dynamic(light: UInt32, dark: UInt32) -> Color {
         func make(_ hex: UInt32) -> UIColor {
@@ -117,6 +119,7 @@ enum NavGlyph: String {
     case back = "chevron.left"
     case forward = "chevron.right"
     case menu = "line.3.horizontal"
+    case notify = "bell"
 
     var label: String {
         switch self {
@@ -124,6 +127,7 @@ enum NavGlyph: String {
         case .back: "Back"
         case .forward: "Forward"
         case .menu: "Menu"
+        case .notify: "Notifications"
         }
     }
 }
@@ -134,6 +138,7 @@ struct NavButton: View {
     let glyph: NavGlyph
     var fill: Fill = .filled
     var disabled = false
+    var dot = false
     let action: () -> Void
 
     @State private var hovering = false
@@ -145,17 +150,18 @@ struct NavButton: View {
             if glyph == .menu {
                 VStack(spacing: 4) {
                     ForEach(0..<3, id: \.self) { _ in
-                        Capsule().frame(width: 17, height: 1.6)
+                        // Filled explicitly: a bare Shape in a Button takes the tint, which
+                        // reads grey, while the bell's Image honours .primary.
+                        Capsule().fill(Color.primary).frame(width: 17, height: 1.6)
                     }
                 }
-                .foregroundStyle(.primary)
             } else {
                 Image(systemName: glyph.rawValue)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(.primary)
             }
         }
-        .buttonStyle(Style(fill: fill, ringed: hovering))
+        .buttonStyle(Style(fill: fill, ringed: hovering, dot: dot))
         .disabled(disabled)
         .opacity(disabled ? 0.35 : 1)
         .onHover { hovering = $0 }
@@ -165,6 +171,7 @@ struct NavButton: View {
     private struct Style: ButtonStyle {
         let fill: Fill
         let ringed: Bool
+        let dot: Bool
         private let diameter: CGFloat = 36
 
         func makeBody(configuration: Configuration) -> some View {
@@ -175,6 +182,18 @@ struct NavButton: View {
                 .overlay {
                     if configuration.isPressed || ringed {
                         Circle().strokeBorder(Color.crtGreen, lineWidth: 2)
+                    }
+                }
+                // The badge rides the corner of the button's own box rather than hanging
+                // outside it: the toolbar clips anything beyond these bounds. A 36pt circle
+                // inscribed in a 36pt square leaves the corners free, so it still reads as
+                // sitting proud of the bell.
+                .overlay(alignment: .topTrailing) {
+                    if dot {
+                        Circle()
+                            .fill(Color.badge)
+                            .frame(width: 9, height: 9)
+                            .offset(x: -1, y: 1)
                     }
                 }
         }
@@ -278,17 +297,36 @@ struct ActionButton: View {
             .buttonStyle(Style(title: title, icon: icon))
     }
 
+    // Optical centring. A symbol's ink sits where the drawing says, not in the middle of its
+    // box: arrow.down carries its head low, paperplane leans up and to the right. Each nudge
+    // is the measured offset of that symbol's ink mass, negated.
+    fileprivate static let nudges: [String: CGSize] = [
+        "arrow.down": CGSize(width: 0.3, height: 0),
+        "arrow.up": CGSize(width: 0.45, height: 0),
+        "arrow.left.arrow.right": CGSize(width: 0, height: 0),
+        "paperplane": CGSize(width: -1, height: 0.9),
+        "qrcode": CGSize(width: 0, height: 0),
+    ]
+
     private struct Style: ButtonStyle {
         let title: String
         let icon: String
         private let diameter: CGFloat = 56
+        private let glyph: CGFloat = 21
+        private var nudge: CGSize { ActionButton.nudges[icon] ?? .zero }
 
         func makeBody(configuration: Configuration) -> some View {
             let pressed = configuration.isPressed
             return VStack(spacing: 8) {
+                // Sized by ink rather than point size: at a common point size these symbols
+                // draw to noticeably different heights, which reads as uneven.
                 Image(systemName: icon)
-                    .font(.system(size: 20, weight: .medium))
+                    .resizable()
+                    .scaledToFit()
+                    .fontWeight(.medium)
                     .foregroundStyle(pressed ? Color.crtInk : Color.crtGlyph)
+                    .frame(width: glyph, height: glyph)
+                    .offset(x: nudge.width, y: nudge.height)
                     .frame(width: diameter, height: diameter)
                     .background(pressed ? Color.crtGreen : Color.card, in: .circle)
                 Text(title)

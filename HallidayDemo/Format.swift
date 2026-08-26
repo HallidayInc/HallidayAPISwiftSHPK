@@ -35,6 +35,12 @@ enum Format {
         return out
     }
 
+    // Drops trailing zeros from an API amount string without changing its value.
+    static func trim(_ text: String) -> String {
+        guard let value = Decimal(string: text) else { return text }
+        return value.formatted(.number.precision(.fractionLength(0...6)))
+    }
+
     static func usd(_ value: Decimal) -> String {
         value.formatted(.currency(code: "USD"))
     }

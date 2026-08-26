@@ -106,18 +106,135 @@ struct DepositInfo: Decodable {
 }
 
 struct NextInstruction: Decodable {
-    let type: String
+    let type: String?
+    let instructionType: String?
+    let errorMessage: String?
+    let assetAmounts: [AssetAmount]?
     let fundingPageUrl: URL?
     let verificationToken: String?
     let verifications: [Verification]?
     let depositInfo: [DepositInfo]?
 }
 
-struct PaymentStatus: Decodable {
+struct PaymentStatus: Decodable, Identifiable {
     let paymentId: String
     let status: String
     let funded: Bool
     let nextInstruction: NextInstruction?
+    let createdAt: String?
+    let quoted: QuotedAmounts?
+    let parentPaymentId: String?
+    let destinationAddress: String?
+    let issues: [Issue]?
+
+    var id: String { paymentId }
+
+    // A payment the user has to act on: the workflow failed, it expired with money already
+    // in the one-time wallet, or it was funded for less than the route will accept.
+    var needsAttention: Bool {
+        if status == "FAILED" { return true }
+        if status == "EXPIRED" && funded { return true }
+        if underfunded { return true }
+        return nextInstruction?.instructionType == "ERROR_WITHDRAW_OR_ROLLOVER"
+    }
+
+    // A payment funded below what its route needs cannot proceed on its own. Halliday
+    // reports this as a parked fund rather than a status change, so the payment sits in
+    // PENDING looking healthy.
+    var underfunded: Bool {
+        issues?.contains(where: \.underfunded) ?? false
+    }
+
+    // What the route still expects, so the reason can name a figure.
+    var required: String? {
+        nextInstruction?.depositInfo?.first?.depositAmount
+    }
+
+    var attentionReason: String? {
+        if underfunded {
+            if let message = issues?.first(where: \.underfunded)?.message { return message }
+            if let required {
+                return "This payment was funded for less than the \(required) its route needs to continue."
+            }
+            return "This payment was funded for less than its route needs to continue."
+        }
+        if let message = nextInstruction?.errorMessage { return message }
+        if status == "EXPIRED" && funded { return "This payment expired after it was funded." }
+        if status == "FAILED" { return "A step in this payment failed to execute." }
+        return nil
+    }
+
+    // TAINTED is sanctions-flagged: it cannot be completed, retried, or withdrawn.
+    var recoverable: Bool { needsAttention && status != "TAINTED" }
+
+    var date: Date? { createdAt.flatMap(Halliday.timestamp.date(from:)) }
+}
+
+// The live API returns kinds the spec does not document, notably "parked_fund", which is
+// how an underfunded payment is reported. Everything past `kind` is therefore optional.
+struct Issue: Decodable {
+    let kind: String
+    let reason: String?
+    let message: String?
+    let given: String?
+    let limits: AmountLimits?
+    let classification: String?
+    let severity: String?
+    let token: String?
+    let balance: ChainIdentifier?
+
+    var underfunded: Bool {
+        if classification == "UNDERFUNDED" { return true }
+        guard kind == "amount" else { return false }
+        if reason == "TOO_LOW" || reason == "UNEXPECTEDLY_LOW" { return true }
+        guard let given = given.flatMap({ Decimal(string: $0) }),
+              let minimum = limits?.min.flatMap({ Decimal(string: $0) })
+        else { return false }
+        return given < minimum
+    }
+}
+
+struct QuotedAmounts: Decodable {
+    let inputAmount: AssetAmount?
+    let outputAmount: AssetAmount?
+}
+
+struct BalanceResult: Decodable {
+    struct Value: Decodable {
+        let kind: String
+        let amount: String?
+        let withdrawalFee: String?
+    }
+    let address: String
+    let token: String
+    let withdrawAccount: String?
+    let value: Value
+
+    var amount: Decimal? {
+        guard value.kind == "amount", let raw = value.amount else { return nil }
+        return Decimal(string: raw)
+    }
+    var fee: Decimal { value.withdrawalFee.flatMap { Decimal(string: $0) } ?? 0 }
+    var net: Decimal { max(0, (amount ?? 0) - fee) }
+}
+
+struct WithdrawAuthorization: Decodable {
+    let signatureType: String
+    let paymentId: String
+    let withdrawAuthorization: String
+    let stateToken: String
+}
+
+struct WithdrawResult: Decodable {
+    let paymentId: String
+    let status: String
+    let transactionHash: String?
+}
+
+struct PaymentHistory: Decodable {
+    let paymentStatuses: [PaymentStatus]
+    let nextPaginationKey: String?
+    let totalPayments: Int?
 }
 
 struct SignaturePayload: Encodable {
@@ -221,7 +338,8 @@ enum Halliday {
         amount: String,
         outputAsset: String,
         destination: String,
-        onrampMethods: [String]? = nil
+        onrampMethods: [String]? = nil,
+        parentPaymentId: String? = nil
     ) async throws -> QuoteResponse {
         struct Request: Encodable {
             struct Inner: Encodable {
@@ -233,6 +351,9 @@ enum Halliday {
             let request: Inner
             let priceCurrency = "USD"
             let onrampMethods: [String]?
+            // Tells Halliday this quote replaces a payment whose funds are still in its
+            // one-time wallet, so the new one can be funded from the old.
+            let parentPaymentId: String?
         }
         let body = Request(
             request: .init(
@@ -240,7 +361,8 @@ enum Halliday {
                 outputAsset: outputAsset,
                 destAddress: destination
             ),
-            onrampMethods: onrampMethods
+            onrampMethods: onrampMethods,
+            parentPaymentId: parentPaymentId
         )
         return try await send("/payments/quotes", body: try encoder.encode(body))
     }
@@ -267,5 +389,55 @@ enum Halliday {
 
     static func payment(id: String) async throws -> PaymentStatus {
         try await send("/payments", query: [URLQueryItem(name: "payment_id", value: id)])
+    }
+
+    static let timestamp: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    static func history(owner: String, limit: Int = 10, cursor: String? = nil) async throws -> PaymentHistory {
+        var query = [
+            URLQueryItem(name: "owner_address", value: owner),
+            URLQueryItem(name: "limit", value: "\(limit)"),
+            URLQueryItem(name: "categories[]", value: "ALL"),
+        ]
+        if let cursor { query.append(URLQueryItem(name: "pagination_key", value: cursor)) }
+        return try await send("/payments/history", query: query)
+    }
+
+    static func balances(paymentId: String) async throws -> [BalanceResult] {
+        struct Request: Encodable { let paymentId: String }
+        struct Response: Decodable { let balanceResults: [BalanceResult] }
+        let body: Response = try await send("/payments/balances", body: try encoder.encode(Request(paymentId: paymentId)))
+        return body.balanceResults
+    }
+
+    static func withdraw(
+        paymentId: String,
+        tokenAmounts: [(token: String, amount: String)],
+        recipient: String,
+        account: String?
+    ) async throws -> WithdrawAuthorization {
+        struct TokenAmount: Encodable { let token: String; let amount: String }
+        struct Request: Encodable {
+            let paymentId: String
+            let tokenAmounts: [TokenAmount]
+            let recipientAddress: String
+            let withdrawAccount: String?
+        }
+        let body = Request(
+            paymentId: paymentId,
+            tokenAmounts: tokenAmounts.map { TokenAmount(token: $0.token, amount: $0.amount) },
+            recipientAddress: recipient,
+            withdrawAccount: account
+        )
+        return try await send("/payments/withdraw", body: try encoder.encode(body))
+    }
+
+    static func withdrawConfirm(signature: String, stateToken: String) async throws -> WithdrawResult {
+        struct Request: Encodable { let signature: String; let stateToken: String }
+        return try await send("/payments/withdraw/confirm", body: try encoder.encode(Request(signature: signature, stateToken: stateToken)))
     }
 }

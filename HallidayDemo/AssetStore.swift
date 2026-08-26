@@ -8,28 +8,35 @@ import UIKit
 @Observable
 final class AssetStore {
     static let allowedSymbols: Set<String> = [
-        "AAVE", "AERO", "ARB", "AVAX", "BNB", "BONK", "BTC", "ETH", "HYPE",
-        "JUP", "LDO", "LINK", "LIT", "MEGA", "MON", "POL", "PROS", "PUSD", "SHIB",
-        "SKY", "SOL", "TRX", "UNI", "USDC", "USDT", "USDT0", "WAVAX", "WBTC", "WETH",
-        "WIF",
+        "AAVE", "AERO", "ARB", "AVAX", "BNB", "BONK", "BTC", "CUSD", "ETH",
+        "HYPE", "JUP", "LDO", "LINK", "LIT", "MEGA", "MON", "PATHUSD", "POL", "PROS",
+        "PUSD", "SHIB", "SKY", "SOL", "STCUSD", "TRX", "UNI", "USDC", "USDT", "USDT0",
+        "WAVAX", "WBTC", "WETH", "WIF",
     ]
 
     static let allowedChains: Set<String> = [
         "arbitrum", "avalanche", "base", "bitcoin", "bsc", "ethereum",
-        "hyperevm", "lighter", "megaeth", "monad", "optimism", "pharos",
-        "polygon", "robinhood", "solana", "stable", "tron", "unichain", "world",
+        "hyperevm", "megaeth", "monad", "optimism", "pharos", "polygon",
+        "robinhood", "solana", "stable", "tempo", "tron", "unichain", "world",
     ]
 
     static let symbolAliases: [String: String] = [
+        "USDC.E": "USDC",
         "USDCE": "USDC",
         "USDT0": "USDT",
     ]
 
     var tokens: [Token] = []
+    // The same list before aliasing. Grouping needs the original spelling to tell which of
+    // two tokens on one chain is the canonical one.
+    private var rawTokens: [Token] = []
+    // Canonical icon per display symbol. USDT0 ships its own logo, but a user who is told
+    // the asset is USDT should see the USDT one.
+    private var canonicalIcons: [String: URL] = [:]
     var groups: [TokenGroup] = []
     var chains: [String: ChainInfo] = [:]
-    // The coin gas is paid in. Kept apart from tokens because a chain's gas coin is not
-    // always in the symbol allowlist.
+    // The coin network fees are paid in. Kept apart from tokens because it is not always
+    // in the symbol allowlist.
     var gasTokens: [String: Token] = [:]
     var icons: [URL: UIImage] = [:]
 
@@ -39,15 +46,25 @@ final class AssetStore {
             async let chainList = Halliday.chains()
             let (allTokens, allChains) = try await (tokenList, chainList)
             chains = allChains.filter { Self.allowedChains.contains($0.key) }
-            tokens = allTokens.filter {
+            canonicalIcons = Dictionary(
+                allTokens.compactMap { token in
+                    let name = Self.display(symbol: token.symbol)
+                    guard token.symbol.caseInsensitiveCompare(name) == .orderedSame,
+                          let image = token.imageURL else { return nil }
+                    return (name.uppercased(), image)
+                },
+                uniquingKeysWith: { first, _ in first }
+            )
+            rawTokens = allTokens.filter {
                 chains[$0.chain]?.family != nil && Self.allowedSymbols.contains(Self.display($0).uppercased())
             }
             gasTokens = Dictionary(
-                allTokens.filter { chains[$0.chain] != nil && $0.address.lowercased() == "0x" }
-                    .map { ($0.chain, $0) },
+                allTokens.filter { chains[$0.chain] != nil && Native.matches($0.address) }
+                    .map { ($0.chain, canonical($0)) },
                 uniquingKeysWith: { first, _ in first }
             )
-            groups = Self.group(tokens)
+            tokens = rawTokens.map(canonical)
+            groups = group(rawTokens)
         } catch {
             Toast.shared.report(error)
         }
@@ -55,27 +72,47 @@ final class AssetStore {
     }
 
     func groups(matching ids: Set<String>) -> [TokenGroup] {
-        Self.group(tokens.filter { ids.contains($0.priceKey) })
+        group(rawTokens.filter { ids.contains($0.priceKey) })
     }
 
     func family(_ chain: String) -> ChainFamily? {
         chains[chain]?.family
     }
 
-    private static func display(_ token: Token) -> String {
-        symbolAliases[token.symbol.uppercased()] ?? token.symbol
+    // USDT0 and USDCe are the same asset to a user, so they are shown under the canonical
+    // spelling wherever a symbol is displayed, balances included.
+    static func display(symbol: String) -> String {
+        symbolAliases[symbol.uppercased()] ?? symbol
     }
 
-    private static func group(_ tokens: [Token]) -> [TokenGroup] {
-        let groups = Dictionary(grouping: tokens, by: display)
+    private static func display(_ token: Token) -> String {
+        display(symbol: token.symbol)
+    }
+
+    private func canonical(_ token: Token) -> Token {
+        let name = Self.display(symbol: token.symbol)
+        return Token(
+            chain: token.chain,
+            address: token.address,
+            name: token.name,
+            symbol: name,
+            decimals: token.decimals,
+            imageURL: canonicalIcons[name.uppercased()] ?? token.imageURL
+        )
+    }
+
+    private func group(_ tokens: [Token]) -> [TokenGroup] {
+        let groups = Dictionary(grouping: tokens, by: Self.display)
             .map { symbol, matches in
                 var byChain: [String: Token] = [:]
                 for token in matches where byChain[token.chain] == nil || token.symbol == symbol {
                     byChain[token.chain] = token
                 }
                 let unique = byChain.values.sorted { $0.chain < $1.chain }
-                let canonical = unique.first { $0.symbol == symbol } ?? unique.first
-                return TokenGroup(symbol: symbol, imageURL: canonical?.imageURL, tokens: unique)
+                let preferred = unique.first { $0.symbol == symbol } ?? unique.first
+                // Aliasing happens last so the choices above can still see USDT0 vs USDT.
+                let icon = canonicalIcons[symbol.uppercased()] ?? preferred?.imageURL
+                return TokenGroup(symbol: symbol, imageURL: icon, tokens: unique.map(canonical))
             }
         return Preferred.sort(groups, pinned: Preferred.tokens, by: \.symbol)
     }

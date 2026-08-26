@@ -62,7 +62,7 @@ final class DepositFlow {
         return balances.all.first { $0.id.lowercased() == input.priceKey }?.amount
     }
 
-    private var isNativeInput: Bool { input?.address.lowercased() == "0x" }
+    private var isNativeInput: Bool { Native.matches(input?.address ?? "") }
 
     // Spending the whole native balance leaves nothing to pay the gas with.
     var gasBuffer: Decimal { isNativeInput ? gasFee : 0 }
@@ -72,19 +72,18 @@ final class DepositFlow {
     }
 
     var gasShortfall: String? {
-        guard fundedByWallet, let input, assets.family(input.chain) == .evm, gasFee > 0 else { return nil }
+        guard fundedByWallet, let input, gasFee > 0 else { return nil }
         let held = isNativeInput ? (inputBalance ?? 0) : balances.nativeAmount(chain: input.chain)
         let needed = isNativeInput ? gasFee + (Decimal(string: amount) ?? 0) : gasFee
-        guard held < needed else { return nil }
-        let symbol = assets.gasTokens[input.chain]?.symbol ?? "gas"
-        return "You need more \(symbol) on \(input.chain.capitalized) to pay for gas."
+        // Some chains list no coin of their own, and then there is no balance to check against.
+        guard let symbol = assets.gasTokens[input.chain]?.symbol, held < needed else { return nil }
+        return "You need more \(symbol) on \(input.chain.capitalized) to cover the network fee."
     }
 
     private func loadGasBuffer() {
         gasFee = 0
         guard fundedByWallet, let input, let chain = assets.chains[input.chain] else { return }
-        let from = wallet.address(.evm)
-        Task { gasFee = await Sender.fee(chain: chain, from: from, tokenAddress: input.address) }
+        Task { gasFee = await Sender.fee(chain: chain, wallet: wallet, tokenAddress: input.address) }
     }
 
     // Swap opens straight on its builder, so pushed screens sit on an empty stack.

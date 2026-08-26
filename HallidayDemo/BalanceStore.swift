@@ -81,13 +81,17 @@ final class BalanceStore {
             }
             all = payload.balances.compactMap { row in
                 guard let amount = Decimal(string: row.amount), amount > 0 else { return nil }
+                // Providers mark a chain's own coin as "0x" while Halliday gives it a real
+                // address, so the two have to be recognised as the same asset.
                 let known = assets.tokens.first {
-                    $0.chain == row.chain && $0.address.caseInsensitiveCompare(row.address) == .orderedSame
+                    guard $0.chain == row.chain else { return false }
+                    if Native.matches(row.address) { return Native.matches($0.address) }
+                    return $0.address.caseInsensitiveCompare(row.address) == .orderedSame
                 }
                 return TokenBalance(
                     id: "\(row.chain):\(row.address)",
                     chain: row.chain,
-                    symbol: row.symbol,
+                    symbol: AssetStore.display(symbol: row.symbol),
                     imageURL: known?.imageURL ?? row.logo,
                     amount: amount,
                     usd: Decimal(string: row.usd) ?? 0,
