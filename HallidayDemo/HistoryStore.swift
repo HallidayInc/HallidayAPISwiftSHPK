@@ -21,8 +21,8 @@ struct Transfer: Decodable, Identifiable {
     let symbol: String
     let amount: String
     let timestamp: String?
-    // The other side of the transfer. Absent on Bitcoin and Solana, where a transaction
-    // has no single counterparty to point at.
+    // The other side of the transfer. Absent on Solana, where a transaction touches many
+    // accounts and none of them is "the" counterparty.
     let counterparty: String?
 
     var id: String { "\(chain):\(hash):\(direction):\(amount)" }
@@ -158,8 +158,6 @@ final class HistoryStore {
         components?.queryItems = [
             URLQueryItem(name: "evm", value: wallet.address(.evm)),
             URLQueryItem(name: "solana", value: wallet.address(.solana)),
-            URLQueryItem(name: "bitcoin", value: wallet.address(.bitcoin)),
-            URLQueryItem(name: "tron", value: wallet.address(.tron)),
             URLQueryItem(name: "offset", value: "\(offset)"),
             URLQueryItem(name: "limit", value: "\(Self.page)"),
         ]

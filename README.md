@@ -67,7 +67,7 @@ Deploy changes with `server/autoupload/deploy.sh` (rsync, `npm install`, `pm2 re
 check). The pm2 process must be started via `npm start` so that node's `--env-file=.env` flag is
 applied — starting `server.js` directly loads no keys and fails silently.
 
-`GET /balances?evm=&solana=&bitcoin=&tron=` returns
+`GET /balances?evm=&solana=` returns
 `{ balances: [{ chain, address, symbol, amount, usd, logo, decimals }], truncated, errors }`.
 `address` is `0x` for a chain's native coin. When Alchemy's metadata omits `decimals` the proxy
 reads `decimals()` off the contract and caches the answer for a day, since it never changes.
@@ -76,10 +76,8 @@ reads `decimals()` off the contract and caches the answer for a day, since it ne
 |---|---|
 | Alchemy Data API | arbitrum, avalanche, base, bsc, ethereum, hyperevm, monad, optimism, polygon, robinhood, solana, unichain, world |
 | Alchemy RPC | megaeth, pharos, stable, tempo |
-| BlockCypher | bitcoin |
-| TronGrid | tron (TRX + known TRC-20) |
 
-All 19 allowlisted chains are covered. The Data API does not index megaeth, pharos, stable, or
+All 17 allowlisted chains are covered. The Data API does not index megaeth, pharos, stable, or
 tempo, so those four are read one asset at a time instead — `eth_getBalance` for the native coin
 and `balanceOf` for each token Halliday lists on that chain. That is only viable because the
 lists are short (8, 3, 3, and 5).
@@ -92,7 +90,7 @@ is capped at 200 balances — wallets holding thousands of spam tokens would oth
 ## Wallets
 
 On first launch the app generates a 12-word BIP39 mnemonic and derives one address per chain
-family — EVM, Solana, Bitcoin, Tron. Wallets persist to `Documents/wallets.json`;
+family — EVM and Solana. Wallets persist to `Documents/wallets.json`;
 add or delete them from the settings menu.
 
 This is example code. The mnemonic is stored in plaintext and is not protected by the Keychain
@@ -137,9 +135,7 @@ Each family computes that fee differently:
 | Family | Fee |
 |---|---|
 | EVM | `eth_gasPrice` × `eth_estimateGas`, padded 25% |
-| Bitcoin | fee-rate × estimated vbytes, which grows with the number of UTXOs being swept |
 | Solana | flat 5,000 lamports per signature |
-| Tron | bandwidth beyond the free daily allowance, at 1,000 sun/byte — usually zero |
 
 EVM gas is estimated per transaction rather than assuming 21,000, both because an ERC-20
 transfer costs several times that and because [EIP-2780](https://eips.ethereum.org/EIPS/eip-2780)
@@ -147,7 +143,7 @@ proposes changing the intrinsic cost.
 
 ## Sending
 
-All four families can send. Signing happens in the app with WalletCore; the chain data each
+Both families can send. Signing happens in the app with WalletCore; the chain data each
 signer needs comes from `server/`, because it sits behind provider keys.
 
 Every allowlisted chain can send and receive.
@@ -161,12 +157,10 @@ never blocked by a fee it cannot measure.
 |---|---|---|
 | EVM | nonce, gas price, gas estimate | ERC-20 transfers go to the contract with the recipient in calldata |
 | Solana | a recent blockhash | SPL sends create the recipient's token account when it does not exist, at the sender's expense |
-| Tron | a recent block reference | Transactions expire 10 minutes after that block; TRC-20 carries a 100 TRX fee limit |
-| Bitcoin | unspent outputs, fee rate | `AnySigner.plan` does coin selection and the change output |
 
 Watch out for how each source names a chain's own coin: the balance proxy uses `0x` everywhere,
-while Halliday's asset list gives a mint for Solana and `bc1` for Bitcoin. `Native.matches`
-is the single test for this. Solana's `So1…112` is WSOL, a real SPL token, and must not be
+while Halliday's asset list gives a mint for Solana. `Native.matches` is the single test
+for this. Solana's `So1…112` is WSOL, a real SPL token, and must not be
 treated as native.
 
 ## Dependencies

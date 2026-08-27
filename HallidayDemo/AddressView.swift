@@ -49,8 +49,6 @@ struct AddressView: View {
         switch family {
         case .evm: "0x..."
         case .solana: "Solana address"
-        case .bitcoin: "bc1..."
-        case .tron: "T..."
         case nil: "Address"
         }
     }

@@ -4,8 +4,6 @@ const app = express();
 app.use(express.json({ limit: "256kb" }));
 const port = process.env.PORT || 3000;
 const alchemyKey = process.env.ALCHEMY_API_KEY;
-const tronKey = process.env.TRONGRID_API_KEY;
-const blockcypherToken = process.env.BLOCKCYPHER_TOKEN;
 const hallidayKey = process.env.HALLIDAY_API_KEY;
 
 const BALANCE_TTL = 15_000;
@@ -17,11 +15,6 @@ const SPL_PROGRAMS = [
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
 ];
-const TRON_BASE = `https://tron-mainnet.g.alchemy.com/v2/${alchemyKey}`;
-// A native transfer is around this size, and bandwidth beyond the free allowance costs
-// 1000 sun per byte.
-const TRON_TRANSFER_BYTES = 300;
-const SUN_PER_BYTE = 1000;
 const ASSETS_TTL = 60 * 60 * 1000;
 const TRANSFER_TTL = 30_000;
 const TRANSFER_DEPTH = 10;
@@ -80,9 +73,6 @@ const NATIVE = {
   world: { symbol: "ETH", decimals: 18 },
 };
 
-const TRC20 = {
-  TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t: { symbol: "USDT", decimals: 6 },
-};
 
 const cache = new Map();
 const inflight = new Map();
@@ -335,72 +325,20 @@ function prices(symbols) {
   });
 }
 
-async function blockcypherBalance(coin, chain, symbol, address) {
-  const token = blockcypherToken ? `?token=${blockcypherToken}` : "";
-  const { ok, body } = await fetchJson(
-    `https://api.blockcypher.com/v1/${coin}/main/addrs/${address}/balance${token}`,
-  );
-  if (!ok || typeof body?.final_balance !== "number") return [];
-  const amount = toAmount(BigInt(body.final_balance), 8);
-  if (!amount) return [];
-  const price = (await prices([symbol]))[symbol];
-  return [{ chain, address: "0x", symbol, logo: null, decimals: 8, amount, usd: usdValue(amount, price) }];
-}
-
-async function tronBalances(address) {
-  const headers = tronKey ? { "TRON-PRO-API-KEY": tronKey } : undefined;
-  const { ok, body } = await fetchJson(
-    `https://api.trongrid.io/v1/accounts/${address}`,
-    { headers },
-  );
-  if (!ok) return [];
-  const account = body?.data?.[0];
-  if (!account) return [];
-
-  const out = [];
-  const trx = toAmount(BigInt(account.balance ?? 0), 6);
-  if (trx) {
-    const price = (await prices(["TRX"]))["TRX"];
-    out.push({ chain: "tron", address: "0x", symbol: "TRX", logo: null, decimals: 6, amount: trx, usd: usdValue(trx, price) });
-  }
-
-  for (const entry of account.trc20 ?? []) {
-    for (const [contract, raw] of Object.entries(entry)) {
-      const meta = TRC20[contract];
-      if (!meta) continue;
-      const amount = toAmount(BigInt(raw), meta.decimals);
-      if (!amount) continue;
-      const price = (await prices([meta.symbol]))[meta.symbol];
-      out.push({
-        chain: "tron",
-        address: contract.toLowerCase(),
-        symbol: meta.symbol,
-        logo: null,
-        decimals: meta.decimals,
-        amount,
-        usd: usdValue(amount, price),
-      });
-    }
-  }
-  return out;
-}
-
 app.get("/health", (req, res) => {
   res.json({ ok: true, alchemy: Boolean(alchemyKey), cached: cache.size });
 });
 
 app.get("/balances", async (req, res) => {
-  const { evm = "", solana = "", bitcoin = "", tron = "" } = req.query;
-  if (!evm && !solana && !bitcoin && !tron) {
+  const { evm = "", solana = "" } = req.query;
+  if (!evm && !solana) {
     return res.status(400).json({ error: "supply at least one address" });
   }
 
-  const key = `balances:${evm}|${solana}|${bitcoin}|${tron}`;
+  const key = `balances:${evm}|${solana}`;
   const payload = await cached(key, BALANCE_TTL, async () => {
     const sources = [
       ["alchemy", () => alchemyBalances(evm, solana)],
-      ["bitcoin", () => (bitcoin ? blockcypherBalance("btc", "bitcoin", "BTC", bitcoin) : [])],
-      ["tron", () => (tron ? tronBalances(tron) : [])],
       ["rpc", () => rpcBalances(evm)],
       ["solana", () => solanaNative(solana)],
       ["solana-tokens", () => solanaTokens(solana)],
@@ -526,73 +464,16 @@ async function solanaTransfers(address) {
   return rows.filter(Boolean);
 }
 
-async function bitcoinTransfers(address) {
-  if (!address) return [];
-  const token = blockcypherToken ? `&token=${blockcypherToken}` : "";
-  const { ok, body } = await fetchJson(`https://api.blockcypher.com/v1/btc/main/addrs/${address}?limit=50${token}`);
-  if (!ok) return [];
-  // A ref with tx_output_n set is money arriving; tx_input_n set is money leaving.
-  return (body?.txrefs ?? []).slice(0, TRANSFER_DEPTH * 2).map((ref) => ({
-    chain: "bitcoin",
-    hash: ref.tx_hash,
-    direction: ref.tx_output_n >= 0 ? "in" : "out",
-    symbol: "BTC",
-    amount: String(ref.value / 10 ** 8),
-    timestamp: ref.confirmed ?? null,
-  }));
-}
-
-async function tronTransfers(address) {
-  if (!address) return [];
-  const base = "https://api.trongrid.io/v1/accounts";
-  const headers = tronKey ? { "TRON-PRO-API-KEY": tronKey } : {};
-  const [native, trc20] = await Promise.all([
-    fetchJson(`${base}/${address}/transactions?limit=${TRANSFER_DEPTH}`, { headers }),
-    fetchJson(`${base}/${address}/transactions/trc20?limit=${TRANSFER_DEPTH}`, { headers }),
-  ]);
-
-  const rows = [];
-  for (const row of trc20.ok ? trc20.body?.data ?? [] : []) {
-    const decimals = Number(row.token_info?.decimals ?? 6);
-    rows.push({
-      chain: "tron",
-      hash: row.transaction_id,
-      direction: row.to === address ? "in" : "out",
-      symbol: row.token_info?.symbol ?? "TRC20",
-      amount: String(Number(row.value) / 10 ** decimals),
-      timestamp: row.block_timestamp ? new Date(row.block_timestamp).toISOString() : null,
-      counterparty: row.to === address ? row.from ?? null : row.to ?? null,
-    });
-  }
-  for (const row of native.ok ? native.body?.data ?? [] : []) {
-    const contract = row.raw_data?.contract?.[0];
-    if (contract?.type !== "TransferContract") continue;
-    const value = contract.parameter?.value;
-    if (!value?.amount) continue;
-    rows.push({
-      chain: "tron",
-      hash: row.txID,
-      direction: value.owner_address === address ? "out" : "in",
-      symbol: "TRX",
-      amount: String(value.amount / 10 ** 6),
-      timestamp: row.block_timestamp ? new Date(row.block_timestamp).toISOString() : null,
-    });
-  }
-  return rows;
-}
-
 app.get("/transfers", async (req, res) => {
-  const { evm = "", solana = "", bitcoin = "", tron = "" } = req.query;
+  const { evm = "", solana = "" } = req.query;
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
 
-  const key = `transfers:${evm}|${solana}|${bitcoin}|${tron}`;
+  const key = `transfers:${evm}|${solana}`;
   const all = await cached(key, TRANSFER_TTL, async () => {
     const settled = await Promise.allSettled([
       evmTransfers(evm),
       solanaTransfers(solana),
-      bitcoinTransfers(bitcoin),
-      tronTransfers(tron),
     ]);
     const rows = settled.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
 
@@ -634,98 +515,6 @@ app.post("/solana/rpc", async (req, res) => {
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
   res.status(ok ? 200 : status).json(body ?? { error: "no response" });
-});
-
-app.get("/bitcoin/utxos", async (req, res) => {
-  const address = String(req.query.address ?? "");
-  if (!address) return res.status(400).json({ error: "address required" });
-
-  const token = blockcypherToken ? `&token=${blockcypherToken}` : "";
-  const [unspent, chain] = await Promise.all([
-    fetchJson(`https://api.blockcypher.com/v1/btc/main/addrs/${address}?unspentOnly=true&includeScript=true&limit=2000${token}`),
-    fetchJson("https://api.blockcypher.com/v1/btc/main"),
-  ]);
-  if (!unspent.ok) return res.status(unspent.status).json({ error: "blockcypher rejected the request" });
-
-  // WalletCore wants the outpoint hash in little-endian, which is the reverse of the
-  // big-endian form block explorers display.
-  const utxos = (unspent.body?.txrefs ?? [])
-    .filter((ref) => ref.script)
-    .map((ref) => ({
-      hash: ref.tx_hash.match(/../g).reverse().join(""),
-      index: ref.tx_output_n,
-      value: ref.value,
-      script: ref.script,
-    }));
-
-  const perKb = chain.body?.medium_fee_per_kb ?? 2000;
-  res.json({ utxos, feePerByte: Math.max(2, Math.ceil(perKb / 1000)) });
-});
-
-app.post("/bitcoin/broadcast", async (req, res) => {
-  const hex = String(req.body?.hex ?? "");
-  if (!hex) return res.status(400).json({ error: "hex required" });
-  const token = blockcypherToken ? `?token=${blockcypherToken}` : "";
-  const { ok, status, body } = await fetchJson(`https://api.blockcypher.com/v1/btc/main/txs/push${token}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tx: hex }),
-  });
-  if (!ok) return res.status(status).json({ error: body?.error ?? "broadcast failed" });
-  res.json({ txid: body?.tx?.hash });
-});
-
-function tronHeaders() {
-  return { "Content-Type": "application/json" };
-}
-
-app.get("/tron/block", async (req, res) => {
-  const { ok, status, body } = await fetchJson(`${TRON_BASE}/wallet/getnowblock`, {
-    method: "POST",
-    headers: tronHeaders(),
-    body: "{}",
-  });
-  const raw = body?.block_header?.raw_data;
-  if (!ok || !raw) return res.status(ok ? 502 : status).json({ error: "could not read the current block" });
-  res.json({
-    number: raw.number,
-    timestamp: raw.timestamp,
-    txTrieRoot: raw.txTrieRoot,
-    parentHash: raw.parentHash,
-    witnessAddress: raw.witness_address,
-    version: raw.version,
-  });
-});
-
-// Tron meters bandwidth rather than charging a gas price, and every account gets a free
-// daily allowance, so a transfer often costs nothing at all.
-app.get("/tron/resource", async (req, res) => {
-  const address = String(req.query.address ?? "");
-  if (!address) return res.status(400).json({ error: "address required" });
-  const { ok, body } = await fetchJson(`${TRON_BASE}/wallet/getaccountresource`, {
-    method: "POST",
-    headers: tronHeaders(),
-    body: JSON.stringify({ address, visible: true }),
-  });
-  if (!ok) return res.status(502).json({ error: "could not read account resources" });
-  const free = (body?.freeNetLimit ?? 0) - (body?.freeNetUsed ?? 0);
-  const staked = (body?.NetLimit ?? 0) - (body?.NetUsed ?? 0);
-  const available = Math.max(0, free) + Math.max(0, staked);
-  const sun = available >= TRON_TRANSFER_BYTES ? 0 : TRON_TRANSFER_BYTES * SUN_PER_BYTE;
-  res.json({ bandwidth: available, sun });
-});
-
-app.post("/tron/broadcast", async (req, res) => {
-  const { ok, status, body } = await fetchJson(`${TRON_BASE}/wallet/broadcasttransaction`, {
-    method: "POST",
-    headers: tronHeaders(),
-    body: JSON.stringify(req.body ?? {}),
-  });
-  if (!ok || body?.result !== true) {
-    const message = body?.message ? Buffer.from(body.message, "hex").toString() : "broadcast failed";
-    return res.status(ok ? 502 : status).json({ error: message });
-  }
-  res.json({ txid: body.txid });
 });
 
 app.listen(port, () => {

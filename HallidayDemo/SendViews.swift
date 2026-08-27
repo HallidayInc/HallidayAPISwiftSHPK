@@ -261,8 +261,6 @@ struct SendAddressView: View {
         switch flow.family {
         case .evm: "0x..."
         case .solana: "Solana address"
-        case .bitcoin: "bc1..."
-        case .tron: "T..."
         case nil: "Address"
         }
     }

@@ -8,16 +8,16 @@ import UIKit
 @Observable
 final class AssetStore {
     static let allowedSymbols: Set<String> = [
-        "AAVE", "AERO", "ARB", "AVAX", "BNB", "BONK", "BTC", "CUSD", "ETH",
-        "HYPE", "JUP", "LDO", "LINK", "LIT", "MEGA", "MON", "PATHUSD", "POL", "PROS",
-        "PUSD", "SHIB", "SKY", "SOL", "STCUSD", "TRX", "UNI", "USDC", "USDT", "USDT0",
-        "WAVAX", "WBTC", "WETH", "WIF",
+        "AAVE", "AERO", "ARB", "AVAX", "BNB", "BONK", "CUSD", "ETH", "HYPE",
+        "JUP", "LDO", "LINK", "LIT", "MEGA", "MON", "PATHUSD", "POL", "PROS", "PUSD",
+        "SHIB", "SKY", "SOL", "STCUSD", "UNI", "USDC", "USDT", "USDT0", "WAVAX",
+        "WBTC", "WETH", "WIF",
     ]
 
     static let allowedChains: Set<String> = [
-        "arbitrum", "avalanche", "base", "bitcoin", "bsc", "ethereum",
-        "hyperevm", "megaeth", "monad", "optimism", "pharos", "polygon",
-        "robinhood", "solana", "stable", "tempo", "tron", "unichain", "world",
+        "arbitrum", "avalanche", "base", "bsc", "ethereum", "hyperevm",
+        "megaeth", "monad", "optimism", "pharos", "polygon", "robinhood",
+        "solana", "stable", "tempo", "unichain", "world",
     ]
 
     static let symbolAliases: [String: String] = [

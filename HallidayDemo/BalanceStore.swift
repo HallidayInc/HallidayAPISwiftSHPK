@@ -60,8 +60,6 @@ final class BalanceStore {
         components?.queryItems = [
             URLQueryItem(name: "evm", value: wallet.address(.evm)),
             URLQueryItem(name: "solana", value: wallet.address(.solana)),
-            URLQueryItem(name: "bitcoin", value: wallet.address(.bitcoin)),
-            URLQueryItem(name: "tron", value: wallet.address(.tron)),
         ]
         guard let url = components?.url else {
             Toast.shared.show("SERVER_URL is not a valid URL: \(Config.serverURL)")

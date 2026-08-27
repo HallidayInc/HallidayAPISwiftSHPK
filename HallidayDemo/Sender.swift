@@ -50,15 +50,6 @@ enum Sender {
                 to: recipient, amount: rawAmount, tokenAddress: tokenAddress,
                 decimals: decimals, wallet: wallet
             )
-        case .tron:
-            return try await TronSender.send(
-                to: recipient, amount: rawAmount, tokenAddress: tokenAddress,
-                decimals: decimals, wallet: wallet
-            )
-        case .bitcoin:
-            return try await BitcoinSender.send(
-                to: recipient, amount: rawAmount, decimals: decimals, wallet: wallet
-            )
         case .evm:
             return try await sendEVM(
                 to: recipient, amount: rawAmount, tokenAddress: tokenAddress,
@@ -140,27 +131,7 @@ enum Sender {
         switch family {
         case .evm: return await evmFee(chain: chain, from: from, tokenAddress: tokenAddress)
         case .solana: return lamportsPerSignature * Decimal(sign: .plus, exponent: -9, significand: 1)
-        case .bitcoin: return await bitcoinFee(from: from)
-        case .tron: return await tronFee(from: from)
         }
-    }
-
-    // Every input has to be signed, so sweeping a wallet with many small UTXOs costs more
-    // than one with a single large one. Sizes are for the P2WPKH inputs WalletCore derives.
-    private static func bitcoinFee(from: String) async -> Decimal {
-        guard let response = try? await Proxy.get("/bitcoin/utxos", ["address": from]),
-              let rows = response["utxos"] as? [[String: Any]], !rows.isEmpty,
-              let perByte = (response["feePerByte"] as? NSNumber)?.intValue
-        else { return 0 }
-        let size = 11 + 68 * rows.count + 31
-        return Decimal(size * perByte) * Decimal(sign: .plus, exponent: -8, significand: 1)
-    }
-
-    private static func tronFee(from: String) async -> Decimal {
-        guard let response = try? await Proxy.get("/tron/resource", ["address": from]),
-              let sun = (response["sun"] as? NSNumber)?.intValue
-        else { return 0 }
-        return Decimal(sun) * Decimal(sign: .plus, exponent: -6, significand: 1)
     }
 
     private static func evmFee(chain: ChainInfo, from: String, tokenAddress: String) async -> Decimal {

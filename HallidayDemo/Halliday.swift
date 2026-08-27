@@ -37,8 +37,6 @@ struct ChainInfo: Decodable {
         switch addressFamily {
         case "EVM": .evm
         case "SOL": .solana
-        case "BTC": .bitcoin
-        case "TRON": .tron
         default: nil
         }
     }
