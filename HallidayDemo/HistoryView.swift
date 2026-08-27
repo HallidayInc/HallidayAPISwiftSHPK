@@ -3,11 +3,14 @@ import SwiftUI
 struct HistoryView: View {
     let wallet: Wallet
     @Bindable var history: HistoryStore
+    // Unwinds the whole modal stack back to the home screen.
+    let onFinished: () -> Void
     @AppStorage("showAllTokens") private var showAllTokens = false
     @Environment(AssetStore.self) private var assets
     @Environment(\.dismiss) private var dismiss
     @State private var scope = HistoryScope.attention
     @State private var selected: PaymentStatus?
+    @State private var transfer: Transfer?
 
     private var rows: [HistoryItem] {
         let items = history.items(scope)
@@ -46,13 +49,26 @@ struct HistoryView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
 
-                list
+                if history.ready {
+                    list
+                } else {
+                    Spacer()
+                    ProgressView()
+                    Spacer()
+                }
             }
             .background(Color.surface)
         }
-        .task { await history.loadFirst(wallet: wallet) }
+        .task {
+            history.supportedAssets = assets.assetIDs
+            await history.loadFirst(wallet: wallet)
+        }
+        .fullScreenCover(item: $transfer) { row in
+            TransferDetailView(transfer: row).environment(assets)
+        }
         .fullScreenCover(item: $selected) { payment in
-            RecoveryView(payment: payment, wallet: wallet)
+            RecoveryView(payment: payment, wallet: wallet, assets: assets, onFinished: onFinished)
+                .environment(assets)
         }
         .toasts()
     }
@@ -84,16 +100,17 @@ struct HistoryView: View {
                     switch item {
                     case let .payment(payment):
                         Button {
-                            if payment.recoverable { selected = payment }
+                            selected = payment
                         } label: {
-                            PaymentRow(payment: payment)
+                            PaymentRow(payment: payment, assets: assets)
                         }
                         .tint(.primary)
-                    case let .transfer(transfer):
-                        TransferRow(transfer: transfer)
+                    case let .transfer(row):
+                        Button { transfer = row } label: { TransferRow(transfer: row) }
+                            .tint(.primary)
                     }
                 }
-                .listRowInsets(EdgeInsets(top: 14, leading: 0, bottom: 14, trailing: 0))
+                .listRowInsets(EdgeInsets(top: 14, leading: 16, bottom: 14, trailing: 16))
                 .listRowSeparatorTint(Color.hairline)
                 .listRowBackground(Color.clear)
             }
@@ -101,21 +118,33 @@ struct HistoryView: View {
             // Reaching the end of what is loaded pulls the next page in. This runs in either
             // scope, since an item needing attention may sit on a later page.
             if !history.done {
-                HStack {
-                    Spacer()
-                    ProgressView()
-                    Spacer()
+                // Paging still runs in either scope, but only the full list shows a spinner
+                // for it. Under Needs attention the pages are being scanned for flagged
+                // payments, which is not something to leave a spinner sitting under.
+                Group {
+                    if scope == .all {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                            Spacer()
+                        }
+                    } else {
+                        Color.clear.frame(height: 1)
+                    }
                 }
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
-                .task { await history.loadMore() }
+                // Keyed on what is loaded: a call that arrives while another page is in
+                // flight returns immediately, and without this the row would never ask again.
+                .task(id: history.payments.count + history.transfers.count) {
+                    await history.loadMore()
+                }
             }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .padding(.horizontal, 16)
         .overlay {
-            if rows.isEmpty && !history.loading && history.done {
+            if rows.isEmpty && history.done {
                 Text(scope == .attention ? "Nothing needs attention." : "No transactions yet.")
                     .haffer(15, .regular)
                     .foregroundStyle(.secondary)
@@ -124,49 +153,77 @@ struct HistoryView: View {
     }
 }
 
+// Every Halliday payment reads the same way regardless of what it was — onramp, swap,
+// deposit or withdrawal: what went in, what came out, and when.
 struct PaymentRow: View {
     let payment: PaymentStatus
-
-    // Onramp and transfer-in payments quote only an output, so the arrow form is used
-    // solely when both sides are known.
-    private var amounts: String {
-        let output = payment.quoted?.outputAmount
-        guard let output else { return "Payment \(payment.paymentId.prefix(8))" }
-        let received = "\(Format.trim(output.amount)) \(symbol(output.asset))"
-        guard let input = payment.quoted?.inputAmount else { return received }
-        return "\(Format.trim(input.amount)) \(symbol(input.asset)) → \(received)"
-    }
-
-    private func symbol(_ asset: String) -> String {
-        // Assets read "chain:address"; the chain alone is enough for a one-line summary.
-        asset.split(separator: ":").first.map(String.init)?.capitalized ?? asset
-    }
+    let assets: AssetStore
 
     var body: some View {
         HStack(spacing: 12) {
+            HistoryTile()
+
             VStack(alignment: .leading, spacing: 3) {
-                Text(amounts)
-                    .haffer(16)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
                 HStack(spacing: 6) {
-                    Text(payment.underfunded
-                         ? "Underfunded"
-                         : payment.status.replacingOccurrences(of: "_", with: " ").capitalized)
-                        .haffer(13, .regular)
-                        .foregroundStyle(payment.needsAttention ? Color.badge : .secondary)
-                    if let date = payment.date {
-                        Text(date.formatted(.dateTime.month().day().hour().minute()))
-                            .haffer(13, .regular)
-                            .foregroundStyle(.secondary)
-                    }
+                    side(payment.inputAsset)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    side(payment.outputAsset)
                 }
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+
+                Text(payment.date.map { $0.formatted(.dateTime.month().day().hour().minute()) } ?? "")
+                    .haffer(13, .regular)
+                    .foregroundStyle(.secondary)
             }
+
             Spacer(minLength: 8)
-            if payment.recoverable {
+
+            HStack(spacing: 8) {
+                if payment.needsAttention(supported: assets.assetIDs) {
+                    Circle().fill(Color.badge).frame(width: 8, height: 8)
+                }
                 Image(systemName: "chevron.right")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
+            }
+            .fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private func side(_ asset: String?) -> some View {
+        if let asset {
+            HStack(spacing: 4) {
+                Text(assets.label(for: asset)).haffer(16)
+                if let chain = assets.chain(for: asset) {
+                    ChainBadge(chain: chain, size: 14)
+                }
+            }
+        } else {
+            Text("—").haffer(16).foregroundStyle(.secondary)
+        }
+    }
+}
+
+// A payment is a Halliday order, so it is marked as one. Built to the same plate, radius
+// and outline as ChainBadge so the two read as the same class of thing.
+struct HistoryTile: View {
+    @Environment(\.colorScheme) private var colorScheme
+    var size: CGFloat = 28
+
+    var body: some View {
+        ZStack {
+            Color.white
+            Image("HallidayMark").resizable().scaledToFit().padding(3)
+        }
+        .frame(width: size, height: size)
+        .clipShape(.rect(cornerRadius: 5))
+        .overlay {
+            if colorScheme == .light {
+                RoundedRectangle(cornerRadius: 5).strokeBorder(.black, lineWidth: 1)
             }
         }
     }
@@ -189,11 +246,16 @@ struct TransferRow: View {
                 }
             }
             Spacer(minLength: 8)
-            Text("\(transfer.incoming ? "+" : "-")\(Format.trim(transfer.amount))")
-                .haffer(16)
-                .foregroundStyle(transfer.incoming ? Color.crtGlyph : .primary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+            HStack(spacing: 8) {
+                Text("\(transfer.incoming ? "+" : "-")\(Format.trim(transfer.amount))")
+                    .haffer(16)
+                    .foregroundStyle(transfer.incoming ? Color.crtGlyph : .primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }

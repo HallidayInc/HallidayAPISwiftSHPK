@@ -94,6 +94,10 @@ enum Theme {
         UINavigationBar.appearance().compactAppearance = bar
         UINavigationBar.appearance().scrollEdgeAppearance = bar
 
+        // Without this the bar keeps the system accent, and a toolbar button's press
+        // highlight comes back blue however the SwiftUI view is tinted.
+        UINavigationBar.appearance().tintColor = UIColor(Color.crtGreen)
+
         UIBarButtonItem.appearance().setTitleTextAttributes([.font: regular], for: .normal)
         UISegmentedControl.appearance().setTitleTextAttributes([.font: regular], for: .normal)
         UITextField.appearance(whenContainedInInstancesOf: [UISearchBar.self]).font = regular
@@ -119,7 +123,7 @@ enum NavGlyph: String {
     case back = "chevron.left"
     case forward = "chevron.right"
     case menu = "line.3.horizontal"
-    case notify = "bell"
+    case notify = "scroll"
 
     var label: String {
         switch self {
@@ -127,7 +131,7 @@ enum NavGlyph: String {
         case .back: "Back"
         case .forward: "Forward"
         case .menu: "Menu"
-        case .notify: "Notifications"
+        case .notify: "History"
         }
     }
 }
@@ -141,7 +145,14 @@ struct NavButton: View {
     var dot = false
     let action: () -> Void
 
+    @Environment(\.colorScheme) private var scheme
     @State private var hovering = false
+
+    // Resolved from SwiftUI's environment rather than left to .primary. These buttons live
+    // in a UINavigationBar, and a dynamic colour there is resolved against UIKit traits,
+    // which on first launch have not yet received the app's preferredColorScheme — so the
+    // glyph rendered neutral until some later trait change corrected it.
+    private var ink: Color { scheme == .dark ? .white : .black }
 
     var body: some View {
         Button(action: action) {
@@ -150,18 +161,17 @@ struct NavButton: View {
             if glyph == .menu {
                 VStack(spacing: 4) {
                     ForEach(0..<3, id: \.self) { _ in
-                        // Filled explicitly: a bare Shape in a Button takes the tint, which
-                        // reads grey, while the bell's Image honours .primary.
-                        Capsule().fill(Color.primary).frame(width: 17, height: 1.6)
+                        Capsule().fill(ink).frame(width: 17, height: 1.6)
                     }
                 }
             } else {
                 Image(systemName: glyph.rawValue)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(ink)
             }
         }
         .buttonStyle(Style(fill: fill, ringed: hovering, dot: dot))
+        .tint(Color.crtGreen)
         .disabled(disabled)
         .opacity(disabled ? 0.35 : 1)
         .onHover { hovering = $0 }
@@ -209,7 +219,8 @@ extension View {
         leading: NavGlyph? = nil,
         onLeading: (() -> Void)? = nil,
         trailing: NavGlyph? = nil,
-        onTrailing: (() -> Void)? = nil
+        onTrailing: (() -> Void)? = nil,
+        trailingDot: Bool = false
     ) -> some View {
         if #available(iOS 26.0, *) {
             toolbar {
@@ -218,7 +229,9 @@ extension View {
                 }
                 .sharedBackgroundVisibility(.hidden)
                 ToolbarItem(placement: .topBarTrailing) {
-                    if let trailing, let onTrailing { NavButton(glyph: trailing, action: onTrailing) }
+                    if let trailing, let onTrailing {
+                        NavButton(glyph: trailing, dot: trailingDot, action: onTrailing)
+                    }
                 }
                 .sharedBackgroundVisibility(.hidden)
             }
@@ -228,7 +241,9 @@ extension View {
                     if let leading, let onLeading { NavButton(glyph: leading, action: onLeading) }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    if let trailing, let onTrailing { NavButton(glyph: trailing, action: onTrailing) }
+                    if let trailing, let onTrailing {
+                        NavButton(glyph: trailing, dot: trailingDot, action: onTrailing)
+                    }
                 }
             }
         }

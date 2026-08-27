@@ -114,14 +114,13 @@ struct HomeView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    NavButton(glyph: .menu) { showSettings = true }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavButton(glyph: .notify, dot: !history.attention.isEmpty) { showHistory = true }
-                }
-            }
+            .navBar(
+                leading: .menu,
+                onLeading: { showSettings = true },
+                trailing: .notify,
+                onTrailing: { showHistory = true },
+                trailingDot: !history.attention.isEmpty
+            )
             .fullScreenCover(isPresented: $showSettings, onDismiss: refresh) {
                 SettingsView()
             }
@@ -148,7 +147,8 @@ struct HomeView: View {
             }
             .fullScreenCover(isPresented: $showHistory, onDismiss: refresh) {
                 if let wallet = store.selected {
-                    HistoryView(wallet: wallet, history: history).environment(assets)
+                    HistoryView(wallet: wallet, history: history, onFinished: { showHistory = false })
+                        .environment(assets)
                 }
             }
             .fullScreenCover(isPresented: $showChains) {
@@ -162,6 +162,7 @@ struct HomeView: View {
             .task {
                 refresh()
                 guard let wallet = store.selected else { return }
+                history.supportedAssets = assets.assetIDs
                 history.prime(wallet: wallet)
                 await history.refreshHead()
                 await history.poll()

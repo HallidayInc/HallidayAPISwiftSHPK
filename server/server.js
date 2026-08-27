@@ -463,6 +463,7 @@ async function evmTransfers(address) {
             symbol: row.asset ?? "",
             amount: String(row.value),
             timestamp: row.metadata?.blockTimestamp ?? null,
+            counterparty: direction === "out" ? row.to ?? null : row.from ?? null,
           }));
       }),
     ),
@@ -560,6 +561,7 @@ async function tronTransfers(address) {
       symbol: row.token_info?.symbol ?? "TRC20",
       amount: String(Number(row.value) / 10 ** decimals),
       timestamp: row.block_timestamp ? new Date(row.block_timestamp).toISOString() : null,
+      counterparty: row.to === address ? row.from ?? null : row.to ?? null,
     });
   }
   for (const row of native.ok ? native.body?.data ?? [] : []) {

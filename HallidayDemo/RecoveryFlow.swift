@@ -24,18 +24,43 @@ final class RecoveryFlow {
     var result: WithdrawResult?
 
     private let wallet: Wallet
+    private let supported: Set<String>
 
-    init(payment: PaymentStatus, wallet: Wallet) {
+    init(payment: PaymentStatus, wallet: Wallet, supported: Set<String>) {
         self.payment = payment
         self.wallet = wallet
+        self.supported = supported
     }
 
-    // Entries that failed to price are skipped; the rest are what can actually be moved.
+    // What can actually be moved: a positive balance in an asset Halliday can withdraw.
+    // The endpoint also returns zero-balance rows and, occasionally, tokens that simply
+    // arrived at the deposit address and are not part of the catalogue.
     var recoverable: [BalanceResult] {
-        balances.filter { ($0.amount ?? 0) > 0 }
+        balances.filter { balance in
+            guard (balance.amount ?? 0) > 0 else { return false }
+            return supported.isEmpty || supported.contains(balance.token.lowercased())
+        }
     }
 
     var hasFunds: Bool { !recoverable.isEmpty }
+
+    // A requote refunds the original intent, so it needs the stuck money to be the same
+    // asset the payment was quoted from. The exception is when /balances reports nothing
+    // at all for that asset while the status API still shows a parked fund — the balance
+    // lookup can lag, and the funds are known to be there.
+    var canRequote: Bool {
+        guard !loading, payment.outputAsset != nil, let input = payment.inputAsset?.lowercased() else {
+            return false
+        }
+        if recoverable.contains(where: { $0.token.lowercased() == input }) { return true }
+        let reported = balances.contains { $0.token.lowercased() == input }
+        return !reported && payment.hasParked(supported: supported)
+    }
+
+    // Prefer the stuck balance in the asset the payment started from.
+    var requoteSource: BalanceResult? {
+        recoverable.first { $0.token.lowercased() == payment.inputAsset?.lowercased() } ?? recoverable.first
+    }
 
     func load() async {
         loading = true
@@ -50,8 +75,18 @@ final class RecoveryFlow {
     var ownerAddress: String { wallet.address(.evm) }
 
     // What a requote would deliver, once one has been fetched.
-    var replacement: Quote?
+    var quoted: QuoteResponse?
     var quoting = false
+
+    var replacement: Quote? { quoted?.best }
+
+    // The stuck balance the replacement would be funded from.
+    var source: BalanceResult? { requoteSource }
+
+    func price(_ asset: String?) -> Decimal? {
+        guard let asset, let raw = quoted?.currentPrices[asset.lowercased()] else { return nil }
+        return Decimal(string: raw)
+    }
 
     var outputAsset: String? { payment.quoted?.outputAmount?.asset }
 
@@ -102,14 +137,14 @@ final class RecoveryFlow {
 
     // Fetched up front so the confirmation screen can say what the retry actually delivers.
     func loadQuote() async {
-        guard replacement == nil, !quoting else { return }
+        guard quoted == nil, !quoting else { return }
         quoting = true
-        replacement = (try? await requote())?.best
+        quoted = try? await requote()
         quoting = false
     }
 
     private func requote() async throws -> QuoteResponse {
-        guard let source = recoverable.first, let outputAsset else {
+        guard let source = requoteSource, let outputAsset else {
             throw HallidayError.http(0, "This payment cannot be retried.")
         }
         return try await Halliday.quote(

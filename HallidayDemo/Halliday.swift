@@ -31,6 +31,7 @@ struct ChainInfo: Decodable {
     let addressFamily: String
     let rpc: URL?
     let chainId: ChainIdentifier?
+    let explorer: URL?
 
     var family: ChainFamily? {
         switch addressFamily {
@@ -126,16 +127,39 @@ struct PaymentStatus: Decodable, Identifiable {
     let parentPaymentId: String?
     let destinationAddress: String?
     let issues: [Issue]?
+    let quoteRequest: QuoteRequest?
+    let withdrawals: [Withdrawal]?
 
     var id: String { paymentId }
 
     // A payment the user has to act on: the workflow failed, it expired with money already
     // in the one-time wallet, or it was funded for less than the route will accept.
-    var needsAttention: Bool {
+    var needsAttention: Bool { needsAttention(supported: []) }
+
+    // `supported` is the set of assets Halliday can actually withdraw. A fund parked in
+    // anything else — a missent token, say — is not recoverable through the API, so it is
+    // not worth flagging. An empty set means the catalogue has not loaded yet; everything
+    // is accepted rather than silently under-reporting.
+    func needsAttention(supported: Set<String>) -> Bool {
+        // Money still parked outranks everything, including a previous withdrawal that only
+        // took part of it.
+        if hasParked(supported: supported) { return true }
+        // Nothing left to recover once a withdrawal has gone through.
+        if withdrawn { return false }
         if status == "FAILED" { return true }
         if status == "EXPIRED" && funded { return true }
-        if underfunded { return true }
         return nextInstruction?.instructionType == "ERROR_WITHDRAW_OR_ROLLOVER"
+    }
+
+    var withdrawn: Bool {
+        withdrawals?.contains { $0.status == "SUCCESS" } ?? false
+    }
+
+    func hasParked(supported: Set<String>) -> Bool {
+        parked.contains { issue in
+            guard let token = issue.token, !supported.isEmpty else { return true }
+            return supported.contains(token.lowercased())
+        }
     }
 
     // A payment funded below what its route needs cannot proceed on its own. Halliday
@@ -144,6 +168,13 @@ struct PaymentStatus: Decodable, Identifiable {
     var underfunded: Bool {
         issues?.contains(where: \.underfunded) ?? false
     }
+
+    var parked: [Issue] { issues?.filter(\.parkedFund) ?? [] }
+
+    var inputAmount: AssetAmount? { quoteRequest?.request?.fixedInputAmount }
+    var outputAmount: AssetAmount? { quoted?.outputAmount }
+    var inputAsset: String? { quoteRequest?.request?.fixedInputAmount?.asset }
+    var outputAsset: String? { quoted?.outputAmount?.asset ?? quoteRequest?.request?.outputAsset }
 
     // What the route still expects, so the reason can name a figure.
     var required: String? {
@@ -172,6 +203,12 @@ struct PaymentStatus: Decodable, Identifiable {
 
 // The live API returns kinds the spec does not document, notably "parked_fund", which is
 // how an underfunded payment is reported. Everything past `kind` is therefore optional.
+struct Withdrawal: Decodable {
+    let status: String?
+    let transactionHash: String?
+    let recipientAddress: String?
+}
+
 struct Issue: Decodable {
     let kind: String
     let reason: String?
@@ -183,8 +220,11 @@ struct Issue: Decodable {
     let token: String?
     let balance: ChainIdentifier?
 
+    var parkedFund: Bool { kind == "parked_fund" }
+
+    // UNDERFUNDED is a short deposit, MISSENT is the wrong token at the deposit address.
     var underfunded: Bool {
-        if classification == "UNDERFUNDED" { return true }
+        if parkedFund { return true }
         guard kind == "amount" else { return false }
         if reason == "TOO_LOW" || reason == "UNEXPECTEDLY_LOW" { return true }
         guard let given = given.flatMap({ Decimal(string: $0) }),
@@ -192,6 +232,15 @@ struct Issue: Decodable {
         else { return false }
         return given < minimum
     }
+}
+
+// quoted.input_amount is always null, so the request is what says what was put in.
+struct QuoteRequest: Decodable {
+    struct Inner: Decodable {
+        let fixedInputAmount: AssetAmount?
+        let outputAsset: String?
+    }
+    let request: Inner?
 }
 
 struct QuotedAmounts: Decodable {

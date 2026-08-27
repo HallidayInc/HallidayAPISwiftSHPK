@@ -21,6 +21,9 @@ struct Transfer: Decodable, Identifiable {
     let symbol: String
     let amount: String
     let timestamp: String?
+    // The other side of the transfer. Absent on Bitcoin and Solana, where a transaction
+    // has no single counterparty to point at.
+    let counterparty: String?
 
     var id: String { "\(chain):\(hash):\(direction):\(amount)" }
     var incoming: Bool { direction == "in" }
@@ -71,6 +74,9 @@ final class HistoryStore {
     var payments: [PaymentStatus] = []
     var transfers: [Transfer] = []
     var loading = false
+    // False until the first page of both feeds has settled, so the view can hold the list
+    // back rather than showing payments while transfers are still in flight.
+    var ready = false
 
     private var cursor: String?
     private var paymentsDone = false
@@ -81,7 +87,10 @@ final class HistoryStore {
 
     var done: Bool { paymentsDone && transfersDone }
 
-    var attention: [PaymentStatus] { payments.filter(\.needsAttention) }
+    // Set once the asset catalogue is available; empty simply means "flag everything".
+    var supportedAssets: Set<String> = []
+
+    var attention: [PaymentStatus] { payments.filter { $0.needsAttention(supported: supportedAssets) } }
 
     func items(_ scope: HistoryScope) -> [HistoryItem] {
         guard scope == .all else { return attention.map(HistoryItem.payment) }
@@ -100,17 +109,21 @@ final class HistoryStore {
         offset = 0
         paymentsDone = false
         transfersDone = false
+        ready = false
     }
 
     // Each feed is checked separately: the home screen primes payments for the badge, so
     // by the time this modal opens only transfers may still be missing.
     func loadFirst(wallet: Wallet) async {
         reset(wallet: wallet)
-        guard !loading else { return }
+        guard !ready else { return }
         loading = true
+        // Both run regardless of what the badge poll already primed, so the combined list
+        // is complete the first time it is shown.
         if payments.isEmpty && !paymentsDone { await loadPayments() }
         if transfers.isEmpty && !transfersDone { await loadTransfers() }
         loading = false
+        ready = true
     }
 
     // Payments page by cursor, transfers by offset, so each keeps its own position.

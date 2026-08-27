@@ -114,8 +114,10 @@ struct SettingsView: View {
 
                     header("Tokens")
                     card {
-                        Toggle(isOn: $showAllTokens) {
-                            Text(showAllTokens ? "Show all tokens (even spam)" : "Show supported tokens only")
+                        // Reads as the state it is in, so the switch is on by default and
+                        // the label never changes under the user's finger.
+                        Toggle(isOn: Binding(get: { !showAllTokens }, set: { showAllTokens = !$0 })) {
+                            Text("Show supported tokens only")
                                 .haffer(16, .regular)
                         }
                         .tint(Color.crtGreen)

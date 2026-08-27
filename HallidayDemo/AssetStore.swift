@@ -33,6 +33,9 @@ final class AssetStore {
     // Canonical icon per display symbol. USDT0 ships its own logo, but a user who is told
     // the asset is USDT should see the USDT one.
     private var canonicalIcons: [String: URL] = [:]
+    // Every asset Halliday knows, unfiltered. Withdrawal is only possible for these, so it
+    // is a wider set than the tokens the app chooses to display.
+    var assetIDs: Set<String> = []
     var groups: [TokenGroup] = []
     var chains: [String: ChainInfo] = [:]
     // The coin network fees are paid in. Kept apart from tokens because it is not always
@@ -46,6 +49,7 @@ final class AssetStore {
             async let chainList = Halliday.chains()
             let (allTokens, allChains) = try await (tokenList, chainList)
             chains = allChains.filter { Self.allowedChains.contains($0.key) }
+            assetIDs = Set(allTokens.map(\.priceKey))
             canonicalIcons = Dictionary(
                 allTokens.compactMap { token in
                     let name = Self.display(symbol: token.symbol)
@@ -77,6 +81,24 @@ final class AssetStore {
 
     func family(_ chain: String) -> ChainFamily? {
         chains[chain]?.family
+    }
+
+    // Halliday identifies assets as "chain:address". Fiat inputs carry no chain at all.
+    func label(for asset: String) -> String {
+        if let token = tokens.first(where: { $0.priceKey == asset.lowercased() }) { return token.symbol }
+        let parts = asset.split(separator: ":")
+        guard parts.count == 2 else { return asset.uppercased() }
+        let address = String(parts[1])
+        return address.count > 8 ? "\(address.prefix(6))…" : address
+    }
+
+    func decimals(for asset: String) -> Int? {
+        tokens.first { $0.priceKey == asset.lowercased() }?.decimals
+    }
+
+    func chain(for asset: String) -> String? {
+        let parts = asset.split(separator: ":")
+        return parts.count == 2 ? String(parts[0]) : nil
     }
 
     // USDT0 and USDCe are the same asset to a user, so they are shown under the canonical
