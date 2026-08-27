@@ -5,22 +5,31 @@ struct DepositTypeView: View {
     var cashEnabled = true
     let onSelect: (Bool) -> Void
 
+    private static let opticalLift: CGFloat = 36
+
     var body: some View {
-        VStack(spacing: 0) {
-            Text(mode == .withdraw ? "Select a withdrawal type." : "Select a deposit type.")
-                .haffer(30)
-                .multilineTextAlignment(.center)
-                .padding(.top, 16)
-                .padding(.bottom, 28)
+        // The buttons centre on the whole screen rather than on the space left under the
+        // headline, which sat them low. The headline floats above them.
+        ZStack {
+            VStack(spacing: 12) {
+                PillButton(
+                    title: cashEnabled ? "Cash" : "Cash (coming soon)",
+                    disabled: !cashEnabled
+                ) { onSelect(true) }
+                PillButton(title: "Crypto") { onSelect(false) }
+            }
+            // The centre of the content area sits below the centre of the screen, because
+            // the toolbar takes more room at the top than the home indicator does at the
+            // bottom. This lifts the pair back onto the screen's own centre line.
+            .offset(y: -Self.opticalLift)
 
-            PillButton(
-                title: cashEnabled ? "Cash" : "Cash (coming soon)",
-                disabled: !cashEnabled
-            ) { onSelect(true) }
-                .padding(.bottom, 12)
-            PillButton(title: "Crypto") { onSelect(false) }
-
-            Spacer()
+            VStack(spacing: 0) {
+                Text(mode == .withdraw ? "Select a withdrawal type." : "Select a deposit type.")
+                    .haffer(30)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 16)
+                Spacer()
+            }
         }
         .padding(.horizontal, 20)
         .navigationBarTitleDisplayMode(.inline)
