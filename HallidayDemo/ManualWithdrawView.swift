@@ -274,7 +274,7 @@ struct ManualWithdrawView: View {
                 .padding(.top, 10)
 
                 if flow.busy {
-                    ProgressView()
+                    GridWave(cell: 6, gap: 3)
                         .frame(maxWidth: .infinity)
                         .padding(.top, 16)
                 } else if let message = notice {

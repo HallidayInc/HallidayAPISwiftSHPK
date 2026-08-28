@@ -22,6 +22,9 @@ struct TokenBalance: Identifiable {
 @Observable
 final class BalanceStore {
     var all: [TokenBalance] = []
+    // False only until the first fetch settles, so the total can hold back rather than
+    // showing $0.00 for a moment on a wallet that is not empty.
+    private(set) var loaded = false
 
     func rows(showAll: Bool) -> [TokenBalance] {
         showAll ? all : all.filter(\.supported)
@@ -54,6 +57,7 @@ final class BalanceStore {
 
         guard !Config.serverURL.isEmpty else {
             Toast.shared.show("SERVER_URL is not set. Add it in Product → Scheme → Edit Scheme → Run → Arguments.")
+            loaded = true
             return
         }
         var components = URLComponents(string: Config.serverURL + "/balances")
@@ -102,5 +106,8 @@ final class BalanceStore {
         } catch {
             Toast.shared.report(error)
         }
+        // Set even on failure: a wallet whose balances cannot be read should show its total
+        // rather than a loader that never resolves.
+        loaded = true
     }
 }

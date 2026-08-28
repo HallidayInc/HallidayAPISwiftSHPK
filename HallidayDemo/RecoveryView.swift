@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct RecoveryView: View {
-    let payment: PaymentStatus
     let wallet: Wallet
     let assets: AssetStore
     let onFinished: () -> Void
@@ -9,12 +8,22 @@ struct RecoveryView: View {
     @State private var flow: RecoveryFlow
     @State private var withdrawing = false
 
+    private var payment: PaymentStatus { flow.payment }
+
     init(payment: PaymentStatus, wallet: Wallet, assets: AssetStore, onFinished: @escaping () -> Void) {
-        self.payment = payment
         self.wallet = wallet
         self.assets = assets
         self.onFinished = onFinished
-        _flow = State(initialValue: RecoveryFlow(payment: payment, wallet: wallet, supported: assets.assetIDs))
+        // A payment is owned by the address on the chain it was funded from, and only that
+        // address can sign its withdrawal.
+        let chain = payment.inputAsset?.split(separator: ":").first.map(String.init)
+        let family = chain.flatMap { assets.family($0) } ?? .evm
+        _flow = State(initialValue: RecoveryFlow(
+            payment: payment,
+            wallet: wallet,
+            supported: assets.assetIDs,
+            owner: wallet.address(family)
+        ))
     }
 
     var body: some View {
@@ -144,7 +153,7 @@ struct RecoveryView: View {
     // and only changes if that call turns something up. Waiting on the network is not a
     // reason to tell someone their payment is broken.
     private var actionable: Bool {
-        payment.needsAttention(supported: assets.assetIDs) || flow.hasFunds
+        payment.needsAttention(balances: flow.loading ? nil : flow.balances) || flow.hasFunds
     }
 
     private func withdrawable(_ token: String?) -> Bool {
@@ -214,7 +223,7 @@ struct RecoveryView: View {
 
             if flow.quoting {
                 Spacer()
-                ProgressView()
+                GridWave()
                 Spacer()
             } else {
                 hairline

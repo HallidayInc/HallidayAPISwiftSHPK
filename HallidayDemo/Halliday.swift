@@ -71,6 +71,16 @@ struct QuoteResponse: Decodable {
     let fault: QuoteFault?
     let limits: [AmountLimits]?
 
+    // Route endpoints lowercase their asset ids on the way in so they match Token.priceKey.
+    // current_prices arrives as sent, and a Solana mint is base58 and case-significant, so
+    // the same normalisation has to happen here or every Solana price lookup misses.
+    var prices: [String: String] {
+        Dictionary(
+            currentPrices.map { ($0.key.lowercased(), $0.value) },
+            uniquingKeysWith: { first, _ in first }
+        )
+    }
+
     // fault.limits is sometimes empty, so fold in the top-level ranges and take the widest span.
     var acceptedRange: (min: Decimal?, max: Decimal?)? {
         guard fault != nil else { return nil }
@@ -130,23 +140,56 @@ struct PaymentStatus: Decodable, Identifiable {
 
     var id: String { paymentId }
 
-    // A payment the user has to act on: the workflow failed, it expired with money already
-    // in the one-time wallet, or it was funded for less than the route will accept.
-    var needsAttention: Bool { needsAttention(supported: []) }
+    // UNCONFIRMED payments were quoted and never confirmed, so there is nothing to show.
+    var listed: Bool { status != "UNCONFIRMED" }
 
-    // `supported` is the set of assets Halliday can actually withdraw. A fund parked in
-    // anything else — a missent token, say — is not recoverable through the API, so it is
-    // not worth flagging. An empty set means the catalogue has not loaded yet; everything
-    // is accepted rather than silently under-reporting.
-    func needsAttention(supported: Set<String>) -> Bool {
-        // Money still parked outranks everything, including a previous withdrawal that only
-        // took part of it.
-        if hasParked(supported: supported) { return true }
-        // Nothing left to recover once a withdrawal has gone through.
-        if withdrawn { return false }
-        if status == "FAILED" { return true }
-        if status == "EXPIRED" && funded { return true }
-        return nextInstruction?.instructionType == "ERROR_WITHDRAW_OR_ROLLOVER"
+    // A payment the user has to act on. Every rule but TAINTED is decided by what is
+    // actually sitting in the payment's one-time wallet, so this needs /payments/balances
+    // alongside the status. A nil balances means "not fetched yet": nothing is claimed
+    // rather than flagging or clearing a payment on incomplete information.
+    func needsAttention(balances: [BalanceResult]?) -> Bool {
+        // Sanctions-flagged. Withdrawals are refused, but the user is still told.
+        if status == "TAINTED" { return true }
+        guard let balances else { return false }
+        let held = balances.filter { ($0.amount ?? 0) > 0 }
+
+        switch status {
+        case "PENDING":
+            // Anything other than the input asset landed at the deposit address.
+            if held.contains(where: { !matchesInput($0.token) }) { return true }
+            // Or the input asset arrived short of what the route will accept.
+            guard let arrived = arrivedInput(balances: balances), arrived > 0,
+                  let minimum = minimumInput
+            else { return false }
+            return arrived < minimum
+        case "COMPLETE", "FAILED", "EXPIRED":
+            return !held.isEmpty
+        default:
+            return false
+        }
+    }
+
+    private func matchesInput(_ token: String) -> Bool {
+        token.lowercased() == inputAsset?.lowercased()
+    }
+
+    // The smallest input the route accepts. Halliday reports it on the issue that flagged
+    // the shortfall; the outstanding deposit amount is the fallback when it does not.
+    var minimumInput: Decimal? {
+        if let min = issues?.compactMap({ $0.limits?.min }).first, let value = Decimal(string: min) {
+            return value
+        }
+        return required.flatMap { Decimal(string: $0) }
+    }
+
+    // What actually arrived in the input asset. The balances endpoint is authoritative, but
+    // it has no row at all for some short deposits, so the amount Halliday recorded on the
+    // issue stands in.
+    func arrivedInput(balances: [BalanceResult]) -> Decimal? {
+        if let row = balances.first(where: { matchesInput($0.token) }), let amount = row.amount {
+            return amount
+        }
+        return issues?.compactMap(\.given).first.flatMap { Decimal(string: $0) }
     }
 
     var withdrawn: Bool {
@@ -179,8 +222,16 @@ struct PaymentStatus: Decodable, Identifiable {
         nextInstruction?.depositInfo?.first?.depositAmount
     }
 
-    var attentionReason: String? {
-        if underfunded {
+    // Names whichever rule flagged the payment, so the two are never out of step.
+    func attentionReason(balances: [BalanceResult]?) -> String? {
+        if status == "TAINTED" {
+            return "This payment was flagged by compliance. It cannot be completed, retried or withdrawn."
+        }
+        guard let balances, needsAttention(balances: balances) else { return nil }
+        if status == "PENDING" {
+            if balances.contains(where: { ($0.amount ?? 0) > 0 && !matchesInput($0.token) }) {
+                return "A token this payment was not expecting arrived at its deposit address."
+            }
             if let message = issues?.first(where: \.underfunded)?.message { return message }
             if let required {
                 return "This payment was funded for less than the \(required) its route needs to continue."
@@ -188,13 +239,16 @@ struct PaymentStatus: Decodable, Identifiable {
             return "This payment was funded for less than its route needs to continue."
         }
         if let message = nextInstruction?.errorMessage { return message }
-        if status == "EXPIRED" && funded { return "This payment expired after it was funded." }
-        if status == "FAILED" { return "A step in this payment failed to execute." }
-        return nil
+        switch status {
+        case "COMPLETE": return "This payment finished with funds still at its deposit address."
+        case "FAILED": return "A step in this payment failed and funds are still at its deposit address."
+        case "EXPIRED": return "This payment expired with funds still at its deposit address."
+        default: return nil
+        }
     }
 
-    // TAINTED is sanctions-flagged: it cannot be completed, retried, or withdrawn.
-    var recoverable: Bool { needsAttention && status != "TAINTED" }
+    // TAINTED is sanctions-flagged: the API refuses withdrawals for it.
+    var recoverable: Bool { status != "TAINTED" }
 
     var date: Date? { createdAt.flatMap(Halliday.timestamp.date(from:)) }
 }
@@ -354,7 +408,7 @@ enum Halliday {
     }
 
     static func prices(input: Token, output: Token) async throws -> [String: String] {
-        try await quote(inputAsset: input.id, amount: "0.0001", outputAsset: output.id, destination: "").currentPrices
+        try await quote(inputAsset: input.id, amount: "0.0001", outputAsset: output.id, destination: "").prices
     }
 
     private struct Routes: Decodable {

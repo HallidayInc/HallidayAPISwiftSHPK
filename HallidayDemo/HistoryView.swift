@@ -8,6 +8,7 @@ struct HistoryView: View {
     @AppStorage("showAllTokens") private var showAllTokens = false
     @Environment(AssetStore.self) private var assets
     @Environment(\.dismiss) private var dismiss
+    private let cache = PaymentCache.shared
     @State private var scope = HistoryScope.attention
     @State private var selected: PaymentStatus?
     @State private var transfer: Transfer?
@@ -53,16 +54,17 @@ struct HistoryView: View {
                     list
                 } else {
                     Spacer()
-                    ProgressView()
+                    GridWave()
                     Spacer()
                 }
             }
             .background(Color.surface)
         }
         .task {
-            history.supportedAssets = assets.assetIDs
-            await history.loadFirst(wallet: wallet)
+            history.viewing = true
+            await history.load(wallet: wallet)
         }
+        .onDisappear { history.viewing = false }
         .fullScreenCover(item: $transfer) { row in
             TransferDetailView(transfer: row).environment(assets)
         }
@@ -102,7 +104,7 @@ struct HistoryView: View {
                         Button {
                             selected = payment
                         } label: {
-                            PaymentRow(payment: payment, assets: assets)
+                            PaymentRow(payment: payment, assets: assets, cache: cache)
                         }
                         .tint(.primary)
                     case let .transfer(row):
@@ -125,7 +127,7 @@ struct HistoryView: View {
                     if scope == .all {
                         HStack {
                             Spacer()
-                            ProgressView()
+                            GridWave(cell: 6, gap: 3)
                             Spacer()
                         }
                     } else {
@@ -136,18 +138,28 @@ struct HistoryView: View {
                 .listRowBackground(Color.clear)
                 // Keyed on what is loaded: a call that arrives while another page is in
                 // flight returns immediately, and without this the row would never ask again.
-                .task(id: history.payments.count + history.transfers.count) {
+                .task(id: history.shownPayments + history.shownTransfers) {
                     await history.loadMore()
                 }
             }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
+        // An empty list is ambiguous until every page and every balance is in, so it holds
+        // the loader rather than claiming there is nothing.
         .overlay {
-            if rows.isEmpty && history.done {
-                Text(scope == .attention ? "Nothing needs attention." : "No transactions yet.")
-                    .haffer(15, .regular)
-                    .foregroundStyle(.secondary)
+            if rows.isEmpty {
+                if history.settled {
+                    Text(scope == .attention
+                         ? "No payments need attention right now."
+                         : "No transactions yet.")
+                        .haffer(15, .regular)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                } else {
+                    GridWave()
+                }
             }
         }
     }
@@ -158,6 +170,7 @@ struct HistoryView: View {
 struct PaymentRow: View {
     let payment: PaymentStatus
     let assets: AssetStore
+    let cache: PaymentCache
 
     var body: some View {
         HStack(spacing: 12) {
@@ -182,7 +195,7 @@ struct PaymentRow: View {
             Spacer(minLength: 8)
 
             HStack(spacing: 8) {
-                if payment.needsAttention(supported: assets.assetIDs) {
+                if payment.needsAttention(balances: cache.balances[payment.paymentId]) {
                     Circle().fill(Color.badge).frame(width: 8, height: 8)
                 }
                 Image(systemName: "chevron.right")

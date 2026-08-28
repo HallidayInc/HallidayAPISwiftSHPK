@@ -393,7 +393,7 @@ struct SendStatusView: View {
             Spacer()
 
             if flow.txHash == nil {
-                ProgressView().controlSize(.large)
+                GridWave()
                 Text("Sending.")
                     .haffer(22)
                     .padding(.top, 16)

@@ -68,91 +68,175 @@ enum HistoryItem: Identifiable {
 @Observable
 final class HistoryStore {
     static let page = 10
-    // Halliday allows polling a payment's status this often.
-    static let pollInterval = Duration.seconds(5)
+    static let interval: TimeInterval = 30
 
-    var payments: [PaymentStatus] = []
-    var transfers: [Transfer] = []
+    // Payments are owned by whichever address confirmed them, and only that address can
+    // sign a withdrawal against them. Both of the wallet's owner addresses are therefore
+    // queried and their results merged.
+    private struct Feed {
+        let owner: String
+        var cursor: String?
+        var buffer: [PaymentStatus] = []
+        var exhausted = false
+    }
+
+    private(set) var payments: [PaymentStatus] = []
+    private(set) var transfers: [Transfer] = []
     var loading = false
     // False until the first page of both feeds has settled, so the view can hold the list
     // back rather than showing payments while transfers are still in flight.
     var ready = false
+    // True while the history screen is up. The badge's timer stands down then, so the list
+    // is never rebuilt under someone who is scrolling it.
+    var viewing = false
+    // True while the balances behind the attention badges are in flight. The payments are
+    // already on screen at that point, but which of them need attention is not yet known.
+    private(set) var checking = false
 
-    private var cursor: String?
-    private var paymentsDone = false
-    private var transfersDone = false
+    // How much of what has been fetched is on screen. Closing the modal winds this back to
+    // a single page, so reopening starts from the ten most recent again.
+    private(set) var shownPayments = 0
+    private(set) var shownTransfers = 0
+
+    private var feeds: [Feed] = []
     private var offset = 0
-    private var owner = ""
+    private var transfersExhausted = false
     private var wallet: Wallet?
+    private var lastLoad: Date?
+    private let cache = PaymentCache.shared
 
-    var done: Bool { paymentsDone && transfersDone }
+    private var owners: [String] {
+        guard let wallet else { return [] }
+        return [wallet.address(.evm), wallet.address(.solana)]
+    }
 
-    // Set once the asset catalogue is available; empty simply means "flag everything".
-    var supportedAssets: Set<String> = []
+    var done: Bool {
+        shownPayments >= payments.count && shownTransfers >= transfers.count
+            && feeds.allSatisfy { $0.exhausted && $0.buffer.isEmpty } && transfersExhausted
+    }
 
-    var attention: [PaymentStatus] { payments.filter { $0.needsAttention(supported: supportedAssets) } }
+    // Nothing further is coming: every page is in and every badge is decided. An empty list
+    // only means "there is nothing" once this is true.
+    var settled: Bool { done && !loading && !checking }
+
+    // The window the list is showing, each payment upgraded to the freshest status held.
+    var visible: [PaymentStatus] { payments.prefix(shownPayments).map(cache.current) }
+
+    var attention: [PaymentStatus] {
+        visible.filter { $0.needsAttention(balances: cache.balances[$0.paymentId]) }
+    }
 
     func items(_ scope: HistoryScope) -> [HistoryItem] {
         guard scope == .all else { return attention.map(HistoryItem.payment) }
-        let combined = payments.map(HistoryItem.payment) + transfers.map(HistoryItem.transfer)
+        let combined = visible.map(HistoryItem.payment)
+            + transfers.prefix(shownTransfers).map(HistoryItem.transfer)
         return combined.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
     }
 
-    func reset(wallet: Wallet) {
-        let address = wallet.address(.evm)
-        guard address != owner else { return }
-        self.owner = address
-        self.wallet = wallet
-        payments = []
-        transfers = []
-        cursor = nil
-        offset = 0
-        paymentsDone = false
-        transfersDone = false
-        ready = false
+    private var stale: Bool {
+        lastLoad.map { Date().timeIntervalSince($0) >= Self.interval } ?? true
     }
 
-    // Each feed is checked separately: the home screen primes payments for the badge, so
-    // by the time this modal opens only transfers may still be missing.
-    func loadFirst(wallet: Wallet) async {
-        reset(wallet: wallet)
-        guard !ready else { return }
-        loading = true
-        // Both run regardless of what the badge poll already primed, so the combined list
-        // is complete the first time it is shown.
-        if payments.isEmpty && !paymentsDone { await loadPayments() }
-        if transfers.isEmpty && !transfersDone { await loadTransfers() }
-        loading = false
-        ready = true
+    // Opening the history screen, and the home screen's badge, both come through here. The
+    // feed is rebuilt at most once every thirty seconds; in between, opening the modal only
+    // winds the window back to the first page of what is already held.
+    func load(wallet: Wallet) async {
+        if self.wallet?.address(.evm) != wallet.address(.evm) {
+            self.wallet = wallet
+            lastLoad = nil
+        }
+        guard !loading else { return }
+
+        if stale {
+            loading = true
+            feeds = owners.map { Feed(owner: $0) }
+            payments = []
+            transfers = []
+            offset = 0
+            transfersExhausted = false
+            shownPayments = 0
+            shownTransfers = 0
+            await appendPage()
+            lastLoad = .now
+            loading = false
+            ready = true
+        } else {
+            shownPayments = min(Self.page, payments.count)
+            shownTransfers = min(Self.page, transfers.count)
+        }
+        await loadVisibleBalances()
     }
 
-    // Payments page by cursor, transfers by offset, so each keeps its own position.
+    func refreshBadge(wallet: Wallet) async {
+        guard !viewing else { return }
+        await load(wallet: wallet)
+    }
+
+    // Driven by the list reaching its end, so it runs as the user scrolls rather than on a
+    // schedule. Anything already fetched is revealed before the network is touched again.
     func loadMore() async {
-        guard !loading, !done, !owner.isEmpty else { return }
-        loading = true
-        async let nextPayments = loadPayments()
-        async let nextTransfers = loadTransfers()
-        _ = await (nextPayments, nextTransfers)
-        loading = false
+        guard !loading, !done else { return }
+        if shownPayments < payments.count || shownTransfers < transfers.count {
+            shownPayments = min(shownPayments + Self.page, payments.count)
+            shownTransfers = min(shownTransfers + Self.page, transfers.count)
+        } else {
+            loading = true
+            await appendPage()
+            loading = false
+        }
+        await loadVisibleBalances()
     }
 
-    private func loadPayments() async {
-        guard !paymentsDone else { return }
+    private func appendPage() async {
+        async let nextPayments = takePayments(Self.page)
+        async let nextTransfers = takeTransfers()
+        let (batch, moreTransfers) = await (nextPayments, nextTransfers)
+        payments += batch
+        transfers += moreTransfers
+        shownPayments = payments.count
+        shownTransfers = transfers.count
+        batch.forEach(cache.record)
+    }
+
+    // A k-way merge over the owner feeds. Each returns newest first, so comparing the head
+    // of every buffer gives a correctly ordered combined page without over-fetching either.
+    private func takePayments(_ count: Int) async -> [PaymentStatus] {
+        var page: [PaymentStatus] = []
+        while page.count < count {
+            for index in feeds.indices where feeds[index].buffer.isEmpty && !feeds[index].exhausted {
+                await fill(index)
+            }
+            let available = feeds.indices.filter { !feeds[$0].buffer.isEmpty }
+            guard let pick = available.max(by: {
+                (feeds[$0].buffer[0].date ?? .distantPast) < (feeds[$1].buffer[0].date ?? .distantPast)
+            }) else { break }
+            page.append(feeds[pick].buffer.removeFirst())
+        }
+        return page
+    }
+
+    private func fill(_ index: Int) async {
         do {
-            let batch = try await Halliday.history(owner: owner, limit: Self.page, cursor: cursor)
-            payments += batch.paymentStatuses
-            cursor = batch.nextPaginationKey
-            paymentsDone = batch.nextPaginationKey == nil || batch.paymentStatuses.isEmpty
+            let batch = try await Halliday.history(
+                owner: feeds[index].owner,
+                limit: Self.page,
+                cursor: feeds[index].cursor
+            )
+            // Unconfirmed payments were quoted and abandoned; they never reach the list, so
+            // a page can come back empty and the merge simply asks for the next one.
+            feeds[index].buffer += batch.paymentStatuses.filter(\.listed)
+            feeds[index].cursor = batch.nextPaginationKey
+            feeds[index].exhausted = batch.nextPaginationKey == nil || batch.paymentStatuses.isEmpty
         } catch {
             Toast.shared.report(error)
-            paymentsDone = true
+            feeds[index].exhausted = true
         }
-        }
+    }
 
-    private func loadTransfers() async {
-        guard !transfersDone, let wallet, !Config.serverURL.isEmpty else {
-            transfersDone = true
-            return
+    private func takeTransfers() async -> [Transfer] {
+        guard !transfersExhausted, let wallet, !Config.serverURL.isEmpty else {
+            transfersExhausted = true
+            return []
         }
         var components = URLComponents(string: Config.serverURL + "/transfers")
         components?.queryItems = [
@@ -161,7 +245,7 @@ final class HistoryStore {
             URLQueryItem(name: "offset", value: "\(offset)"),
             URLQueryItem(name: "limit", value: "\(Self.page)"),
         ]
-        guard let url = components?.url else { transfersDone = true; return }
+        guard let url = components?.url else { transfersExhausted = true; return [] }
 
         struct Response: Decodable {
             let transfers: [Transfer]
@@ -170,41 +254,26 @@ final class HistoryStore {
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let batch = try JSONDecoder().decode(Response.self, from: data)
-            transfers += batch.transfers
             offset += batch.transfers.count
-            transfersDone = batch.done || batch.transfers.isEmpty
+            transfersExhausted = batch.done || batch.transfers.isEmpty
+            return batch.transfers
         } catch {
-            transfersDone = true
+            transfersExhausted = true
+            return []
         }
     }
 
-    // Records which wallet is in view without discarding anything already loaded.
-    func prime(wallet: Wallet) {
-        reset(wallet: wallet)
-        self.owner = wallet.address(.evm)
-        self.wallet = wallet
-    }
-
-    // Re-reads the newest page and folds it over what is held, so a status that changes
-    // while the app is open updates in place. Failures stay silent; this runs on a timer.
-    func refreshHead() async {
-        guard !owner.isEmpty,
-              let batch = try? await Halliday.history(owner: owner, limit: Self.page, cursor: nil)
-        else { return }
-        let fresh = Set(batch.paymentStatuses.map(\.paymentId))
-        payments = batch.paymentStatuses + payments.filter { !fresh.contains($0.paymentId) }
-        if cursor == nil { cursor = batch.nextPaginationKey }
-        if payments.count <= batch.paymentStatuses.count {
-            paymentsDone = batch.nextPaginationKey == nil
-        }
-    }
-
-    // Runs until the calling view goes away, which cancels the surrounding task.
-    func poll() async {
-        while !Task.isCancelled {
-            try? await Task.sleep(for: Self.pollInterval)
-            guard !Task.isCancelled else { return }
-            await refreshHead()
+    // Every attention rule but TAINTED is decided by the payment's deposit-wallet balance,
+    // so the rows on screen each need one. The cache keeps this to a single request per
+    // payment per interval however often the window is recomputed.
+    private func loadVisibleBalances() async {
+        let ids = payments.prefix(shownPayments).map(\.paymentId)
+        checking = true
+        defer { checking = false }
+        await withTaskGroup(of: Void.self) { group in
+            for id in ids {
+                group.addTask { @MainActor in await self.cache.loadBalances(id) }
+            }
         }
     }
 }

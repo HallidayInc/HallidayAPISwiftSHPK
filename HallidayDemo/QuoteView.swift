@@ -55,7 +55,7 @@ struct QuoteView: View {
 
             if flow.quote == nil {
                 Spacer()
-                ProgressView()
+                GridWave()
                 Spacer()
             } else {
                 hairline

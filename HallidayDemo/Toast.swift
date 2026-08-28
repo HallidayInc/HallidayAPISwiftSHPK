@@ -4,6 +4,7 @@ import SwiftUI
 struct LoggedError: Identifiable {
     let id = UUID()
     let message: String
+    let origin: String
     let date: Date
 }
 
@@ -31,9 +32,15 @@ final class Toast {
         }
     }
 
-    func show(_ message: String) {
-        self.message = message
-        history.insert(LoggedError(message: message, date: .now), at: 0)
+    // #fileID is "HallidayDemo/SendFlow.swift"; only the file name is worth showing.
+    static func origin(_ file: String, _ line: Int) -> String {
+        "\(file.split(separator: "/").last.map(String.init) ?? file):\(line)"
+    }
+
+    func show(_ message: String, file: String = #fileID, line: Int = #line) {
+        let origin = Self.origin(file, line)
+        self.message = "\(message)\n\(origin)"
+        history.insert(LoggedError(message: message, origin: origin, date: .now), at: 0)
         if history.count > Self.historyLimit {
             history.removeLast(history.count - Self.historyLimit)
         }
@@ -45,11 +52,12 @@ final class Toast {
         }
     }
 
-    func report(_ error: Error) {
+    // The call site is forwarded so the log points at whoever caught the error, not at this file.
+    func report(_ error: Error, file: String = #fileID, line: Int = #line) {
         if let error = error as? LocalizedError, let description = error.errorDescription {
-            show(description)
+            show(description, file: file, line: line)
         } else {
-            show(String(describing: error))
+            show(String(describing: error), file: file, line: line)
         }
     }
 

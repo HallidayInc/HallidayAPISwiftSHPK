@@ -16,21 +16,31 @@ enum RecoveryChoice {
 @MainActor
 @Observable
 final class RecoveryFlow {
-    let payment: PaymentStatus
     var choice: RecoveryChoice?
-    var balances: [BalanceResult] = []
     var loading = true
     var busy = false
     var result: WithdrawResult?
 
+    private let original: PaymentStatus
     private let wallet: Wallet
     private let supported: Set<String>
+    private let cache = PaymentCache.shared
 
-    init(payment: PaymentStatus, wallet: Wallet, supported: Set<String>) {
-        self.payment = payment
+    // Only the address that owns a payment can sign against it, so Solana-originated
+    // payments are owned by the Solana address and everything else by the EVM one.
+    let ownerAddress: String
+
+    init(payment: PaymentStatus, wallet: Wallet, supported: Set<String>, owner: String) {
+        self.original = payment
         self.wallet = wallet
         self.supported = supported
+        self.ownerAddress = owner
     }
+
+    // Both come from the shared cache, which holds this to one round trip per payment per
+    // interval however many screens ask for it.
+    var payment: PaymentStatus { cache.current(original) }
+    var balances: [BalanceResult] { cache.balances[original.paymentId] ?? [] }
 
     // What can actually be moved: a positive balance in an asset Halliday can withdraw.
     // The endpoint also returns zero-balance rows and, occasionally, tokens that simply
@@ -62,17 +72,12 @@ final class RecoveryFlow {
         recoverable.first { $0.token.lowercased() == payment.inputAsset?.lowercased() } ?? recoverable.first
     }
 
+    // Opening a payment refreshes its status and its deposit-wallet balance together.
     func load() async {
         loading = true
-        do {
-            balances = try await Halliday.balances(paymentId: payment.paymentId)
-        } catch {
-            Toast.shared.report(error)
-        }
+        await cache.load(original.paymentId)
         loading = false
     }
-
-    var ownerAddress: String { wallet.address(.evm) }
 
     // What a requote would deliver, once one has been fetched.
     var quoted: QuoteResponse?
@@ -84,7 +89,7 @@ final class RecoveryFlow {
     var source: BalanceResult? { requoteSource }
 
     func price(_ asset: String?) -> Decimal? {
-        guard let asset, let raw = quoted?.currentPrices[asset.lowercased()] else { return nil }
+        guard let asset, let raw = quoted?.prices[asset.lowercased()] else { return nil }
         return Decimal(string: raw)
     }
 
@@ -105,6 +110,8 @@ final class RecoveryFlow {
             )
             let signature = try sign(authorization)
             result = try await Halliday.withdrawConfirm(signature: signature, stateToken: authorization.stateToken)
+            // The cached balance is now the one that was just moved.
+            cache.invalidate(original.paymentId)
         } catch {
             Toast.shared.report(error)
         }

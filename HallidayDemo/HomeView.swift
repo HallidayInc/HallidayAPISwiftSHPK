@@ -46,11 +46,17 @@ struct HomeView: View {
                         .haffer(14, .regular)
                         .foregroundStyle(.secondary)
                     HStack(spacing: 10) {
-                        Text(total, format: .currency(code: "USD"))
-                            .haffer(46)
-                        // The badge only appears when the total is scoped to one chain.
-                        if let chain {
-                            ChainBadge(chain: chain, size: 26)
+                        if balances.loaded {
+                            Text(total, format: .currency(code: "USD"))
+                                .haffer(46)
+                            // The badge only appears when the total is scoped to one chain.
+                            if let chain {
+                                ChainBadge(chain: chain, size: 26)
+                            }
+                        } else {
+                            // Sized to sit in the same space the figure will occupy.
+                            GridWave(cell: 9, gap: 4)
+                                .frame(height: 55)
                         }
                     }
                 }
@@ -159,13 +165,15 @@ struct HomeView: View {
                     DepositView(wallet: wallet, assets: assets, balances: balances, mode: .swap)
                 }
             }
+            // The badge reads the same feed the history screen does, on the same thirty
+            // second interval, so the two never disagree about what needs attention.
             .task {
                 refresh()
                 guard let wallet = store.selected else { return }
-                history.supportedAssets = assets.assetIDs
-                history.prime(wallet: wallet)
-                await history.refreshHead()
-                await history.poll()
+                while !Task.isCancelled {
+                    await history.refreshBadge(wallet: wallet)
+                    try? await Task.sleep(for: .seconds(HistoryStore.interval))
+                }
             }
         }
         .toasts()

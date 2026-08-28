@@ -136,12 +136,15 @@ struct SettingsView: View {
                         }
                         ForEach(Array(toast.history.enumerated()), id: \.element.id) { index, error in
                             Button {
-                                Toast.copy(error.message, label: "Error")
+                                Toast.copy("\(error.origin) \(error.message)", label: "Error")
                             } label: {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(error.date, format: .dateTime.hour().minute().second())
-                                        .haffer(12, .regular)
-                                        .foregroundStyle(.secondary)
+                                    HStack(spacing: 6) {
+                                        Text(error.date, format: .dateTime.hour().minute().second())
+                                        Text(error.origin).lineLimit(1).truncationMode(.head)
+                                    }
+                                    .haffer(12, .regular)
+                                    .foregroundStyle(.secondary)
                                     Text(error.message)
                                         .haffer(14, .regular)
                                         .fixedSize(horizontal: false, vertical: true)

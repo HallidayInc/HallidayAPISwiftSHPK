@@ -17,7 +17,7 @@ struct DepositStatusView: View {
                 Spacer()
             } else if flow.isFunded {
                 Spacer()
-                ProgressView().controlSize(.large)
+                GridWave()
                 Text(fundedText)
                     .haffer(22)
                     .multilineTextAlignment(.center)
@@ -38,7 +38,7 @@ struct DepositStatusView: View {
                 Spacer()
             } else if flow.fundedByWallet {
                 Spacer()
-                ProgressView().controlSize(.large)
+                GridWave()
                 Text(flow.txHash == nil ? sendingText : sentText)
                     .haffer(22)
                     .multilineTextAlignment(.center)
@@ -87,7 +87,7 @@ struct DepositStatusView: View {
                 Spacer()
             } else {
                 Spacer()
-                ProgressView()
+                GridWave()
                 Spacer()
             }
         }

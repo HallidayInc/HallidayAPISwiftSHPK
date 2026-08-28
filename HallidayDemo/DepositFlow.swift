@@ -222,7 +222,7 @@ final class DepositFlow {
                 onrampMethods: methods
             )
             self.quote = response
-            self.prices = response.currentPrices
+            self.prices = response.prices
         }
     }
 
@@ -295,10 +295,12 @@ final class DepositFlow {
         mode == .withdraw ? destinationAddress : wallet.address(assets.family(token.chain) ?? .evm)
     }
 
-    private func run(_ work: @escaping () async throws -> Void) {
+    // Every step funnels through here, so the caller's location is forwarded rather than
+    // letting each failure report this one line.
+    private func run(file: String = #fileID, line: Int = #line, _ work: @escaping () async throws -> Void) {
         busy = true
         Task {
-            do { try await work() } catch { Toast.shared.report(error) }
+            do { try await work() } catch { Toast.shared.report(error, file: file, line: line) }
             busy = false
         }
     }

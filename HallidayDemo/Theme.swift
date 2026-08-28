@@ -271,7 +271,7 @@ struct PillButton: View {
             let pressed = configuration.isPressed && !disabled
             return Group {
                 if busy {
-                    ProgressView().tint(.primary)
+                    GridWave(cell: 5, gap: 3)
                 } else {
                     Text(title)
                         .haffer(17)
