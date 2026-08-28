@@ -10,8 +10,6 @@ struct DepositView: View {
         _flow = State(initialValue: DepositFlow(wallet: wallet, assets: assets, balances: balances, mode: mode))
     }
 
-    private var canClose: Bool { !flow.isFunded || flow.isComplete }
-
     var body: some View {
         NavigationStack(path: $flow.path) {
             Group {
@@ -29,7 +27,7 @@ struct DepositView: View {
                 }
             }
             .navigationDestination(for: DepositStep.self) { destination($0) }
-            .navBar(trailing: canClose ? .close : nil, onTrailing: { dismiss() })
+            .navBar(trailing: .close, onTrailing: { dismiss() })
         }
         .toasts()
         .preferredColorScheme(appearance.resolved)
@@ -96,7 +94,7 @@ struct DepositView: View {
             // The funding/QR step is terminal: leaving it would abandon a live payment.
             leading: step == .deposit ? nil : .back,
             onLeading: { if !flow.path.isEmpty { flow.path.removeLast() } },
-            trailing: canClose ? .close : nil,
+            trailing: .close,
             onTrailing: { dismiss() }
         )
         .navigationBarBackButtonHidden()
