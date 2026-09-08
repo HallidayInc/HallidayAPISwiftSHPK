@@ -4,3 +4,10 @@
 
 DEVELOPMENT_TEAM = YOUR_TEAM_ID
 PRODUCT_BUNDLE_IDENTIFIER = com.example.HallidayDemo
+
+// Baked into Info.plist at build time, so the app also works when launched from the home
+// screen. The scheme's environment variables only reach the app when Xcode starts it.
+// A double slash starts a comment in an xcconfig, so a URL cannot be written literally.
+SLASH = /
+HALLIDAY_API_KEY = pk_YOUR_HALLIDAY_PUBLIC_KEY
+SERVER_URL = https:$(SLASH)$(SLASH)your-server.example.com
