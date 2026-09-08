@@ -4,7 +4,7 @@ A minimal iOS app demonstrating using the [Halliday](https://halliday.xyz) REST 
 
 For iPhone, iOS 17+. Built with Xcode 26.
 
-This app source code is intended for educational purposes only. The Halliday API design patterns are recommended for use in production. However, this app is not audited. Do not use the wallet portion of this code in production. The wallet code in this app is not pertinent to Hallday implementations. **Holding assets in a wallet mnemonic in this app is to be done at your own risk!**
+This app source code is intended for educational purposes only. The Halliday API design patterns are recommended for use in production. However, this app is not audited. Do not use the wallet portion of this code in production. The wallet code in this app is not pertinent to Halliday implementations. **Holding assets in a wallet mnemonic in this app is to be done at your own risk!**
 
 ## Setup
 
