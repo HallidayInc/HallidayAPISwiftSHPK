@@ -55,7 +55,7 @@ struct RecoveryView: View {
             ManualWithdrawView(
                 payment: payment,
                 wallet: wallet,
-                account: flow.recoverable.first?.withdrawAccount,
+                from: flow.recoverable.first?.withdrawFrom,
                 stuck: flow.requoteSource,
                 onFinished: onFinished
             )

@@ -35,18 +35,18 @@ final class PaymentCache {
 
     // Balances only. The list uses this to decide the attention badge for rows whose status
     // it already has.
-    func loadBalances(_ id: String) async {
+    func loadBalances(_ id: String, owner: String) async {
         guard stale(balanceStamp[id]), !inflight.contains(id) else { return }
         inflight.insert(id)
         defer { inflight.remove(id) }
-        guard let result = try? await Halliday.balances(paymentId: id) else { return }
+        guard let result = try? await Halliday.balances(owner: owner, paymentId: id) else { return }
         balances[id] = result
         balanceStamp[id] = .now
     }
 
     // Status and balances together, for a payment the user has opened. Either half is
     // skipped if it was already fetched inside the window.
-    func load(_ id: String) async {
+    func load(_ id: String, owner: String) async {
         guard !inflight.contains(id) else { return }
         inflight.insert(id)
         defer { inflight.remove(id) }
@@ -56,7 +56,7 @@ final class PaymentCache {
         guard wantStatus || wantBalances else { return }
 
         async let fetchedStatus = Self.fetchStatus(id, when: wantStatus)
-        async let fetchedBalances = Self.fetchBalances(id, when: wantBalances)
+        async let fetchedBalances = Self.fetchBalances(id, owner: owner, when: wantBalances)
         let (newStatus, newBalances) = await (fetchedStatus, fetchedBalances)
 
         if let newStatus {
@@ -74,9 +74,9 @@ final class PaymentCache {
         return try? await Halliday.payment(id: id)
     }
 
-    private static func fetchBalances(_ id: String, when wanted: Bool) async -> [BalanceResult]? {
+    private static func fetchBalances(_ id: String, owner: String, when wanted: Bool) async -> [BalanceResult]? {
         guard wanted else { return nil }
-        return try? await Halliday.balances(paymentId: id)
+        return try? await Halliday.balances(owner: owner, paymentId: id)
     }
 
     // Called after a withdrawal so the next read does not serve the balance that was moved.

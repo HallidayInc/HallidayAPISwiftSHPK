@@ -75,7 +75,7 @@ final class RecoveryFlow {
     // Opening a payment refreshes its status and its deposit-wallet balance together.
     func load() async {
         loading = true
-        await cache.load(original.paymentId)
+        await cache.load(original.paymentId, owner: original.ownerAddress ?? ownerAddress)
         loading = false
     }
 
@@ -103,10 +103,10 @@ final class RecoveryFlow {
         do {
             let recipient = try await destination(for: choice)
             let authorization = try await Halliday.withdraw(
+                from: recoverable.first?.withdrawFrom,
                 paymentId: payment.paymentId,
                 tokenAmounts: recoverable.map { ($0.token, $0.value.amount ?? "0") },
-                recipient: recipient,
-                account: recoverable.first?.withdrawAccount
+                recipient: recipient
             )
             let signature = try sign(authorization)
             result = try await Halliday.withdrawConfirm(signature: signature, stateToken: authorization.stateToken)

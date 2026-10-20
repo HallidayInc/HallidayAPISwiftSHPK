@@ -22,12 +22,12 @@ final class ManualWithdraw {
 
     let payment: PaymentStatus
     private let wallet: Wallet
-    private let account: String?
+    private let from: WithdrawFrom?
 
-    init(payment: PaymentStatus, wallet: Wallet, account: String?) {
+    init(payment: PaymentStatus, wallet: Wallet, from: WithdrawFrom?) {
         self.payment = payment
         self.wallet = wallet
-        self.account = account
+        self.from = from
     }
 
     var family: ChainFamily?
@@ -63,10 +63,10 @@ final class ManualWithdraw {
         defer { busy = false }
         do {
             let authorization = try await Halliday.withdraw(
+                from: from,
                 paymentId: payment.paymentId,
                 tokenAmounts: [(token.id, amount)],
-                recipient: destination,
-                account: account
+                recipient: destination
             )
             let signature = try sign(authorization)
             result = try await Halliday.withdrawConfirm(signature: signature, stateToken: authorization.stateToken)
@@ -121,14 +121,14 @@ struct ManualWithdrawView: View {
     init(
         payment: PaymentStatus,
         wallet: Wallet,
-        account: String?,
+        from: WithdrawFrom?,
         stuck: BalanceResult?,
         onFinished: @escaping () -> Void
     ) {
         self.wallet = wallet
         self.stuck = stuck
         self.onFinished = onFinished
-        _flow = State(initialValue: ManualWithdraw(payment: payment, wallet: wallet, account: account))
+        _flow = State(initialValue: ManualWithdraw(payment: payment, wallet: wallet, from: from))
     }
 
     // A detected stuck balance is a good default; the user can still change any of it.

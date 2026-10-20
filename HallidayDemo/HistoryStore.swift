@@ -267,12 +267,13 @@ final class HistoryStore {
     // so the rows on screen each need one. The cache keeps this to a single request per
     // payment per interval however often the window is recomputed.
     private func loadVisibleBalances() async {
-        let ids = payments.prefix(shownPayments).map(\.paymentId)
+        let shown = Array(payments.prefix(shownPayments))
         checking = true
         defer { checking = false }
         await withTaskGroup(of: Void.self) { group in
-            for id in ids {
-                group.addTask { @MainActor in await self.cache.loadBalances(id) }
+            for payment in shown {
+                guard let owner = payment.ownerAddress else { continue }
+                group.addTask { @MainActor in await self.cache.loadBalances(payment.paymentId, owner: owner) }
             }
         }
     }

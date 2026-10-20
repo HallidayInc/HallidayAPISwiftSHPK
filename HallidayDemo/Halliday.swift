@@ -129,6 +129,7 @@ struct PaymentStatus: Decodable, Identifiable {
     let paymentId: String
     let status: String
     let funded: Bool
+    let ownerAddress: String?
     let nextInstruction: NextInstruction?
     let createdAt: String?
     let quoted: QuotedAmounts?
@@ -308,7 +309,7 @@ struct BalanceResult: Decodable {
     }
     let address: String
     let token: String
-    let withdrawAccount: String?
+    let withdrawFrom: WithdrawFrom?
     let value: Value
 
     var amount: Decimal? {
@@ -319,15 +320,25 @@ struct BalanceResult: Decodable {
     var net: Decimal { max(0, (amount ?? 0) - fee) }
 }
 
+// Passed back to /payments/withdraw exactly as /payments/balances returned it.
+struct WithdrawFrom: Codable {
+    let withdrawType: String
+    let paymentId: String?
+    let withdrawAccount: String?
+    let rdwAddress: String?
+}
+
 struct WithdrawAuthorization: Decodable {
     let signatureType: String
-    let paymentId: String
+    let paymentId: String?
+    let withdrawId: String?
     let withdrawAuthorization: String
     let stateToken: String
 }
 
 struct WithdrawResult: Decodable {
-    let paymentId: String
+    let paymentId: String?
+    let withdrawId: String?
     let status: String
     let transactionHash: String?
 }
@@ -508,37 +519,49 @@ enum Halliday {
         return try await send("/payments/history", query: query)
     }
 
-    static func balances(paymentId: String) async throws -> [BalanceResult] {
-        struct Request: Encodable { let paymentId: String }
+    static func balances(owner: String, paymentId: String) async throws -> [BalanceResult] {
+        struct Scope: Encodable { let kind = "PAYMENT"; let paymentId: String }
+        struct Query: Encodable { let source = "OWNER"; let owner: String; let scope: Scope }
+        struct Request: Encodable { let query: Query }
         struct Response: Decodable { let balanceResults: [BalanceResult] }
-        let body: Response = try await send("/payments/balances", body: try encoder.encode(Request(paymentId: paymentId)))
+        let request = Request(query: Query(owner: owner, scope: Scope(paymentId: paymentId)))
+        let body: Response = try await send("/payments/balances", body: try encoder.encode(request))
         return body.balanceResults
     }
 
+    // `from` comes from a balance row. Without one, the deprecated payment_id form is sent.
     static func withdraw(
+        from: WithdrawFrom?,
         paymentId: String,
         tokenAmounts: [(token: String, amount: String)],
-        recipient: String,
-        account: String?
+        recipient: String
     ) async throws -> WithdrawAuthorization {
         struct TokenAmount: Encodable { let token: String; let amount: String }
         struct Request: Encodable {
-            let paymentId: String
+            let withdrawFrom: WithdrawFrom?
+            let paymentId: String?
             let tokenAmounts: [TokenAmount]
             let recipientAddress: String
-            let withdrawAccount: String?
         }
         let body = Request(
-            paymentId: paymentId,
+            withdrawFrom: from,
+            paymentId: from == nil ? paymentId : nil,
             tokenAmounts: tokenAmounts.map { TokenAmount(token: $0.token, amount: $0.amount) },
-            recipientAddress: recipient,
-            withdrawAccount: account
+            recipientAddress: recipient
         )
         return try await send("/payments/withdraw", body: try encoder.encode(body))
     }
 
+    // Confirms, then polls /payments/withdraw/status while the withdrawal is PENDING.
     static func withdrawConfirm(signature: String, stateToken: String) async throws -> WithdrawResult {
         struct Request: Encodable { let signature: String; let stateToken: String }
-        return try await send("/payments/withdraw/confirm", body: try encoder.encode(Request(signature: signature, stateToken: stateToken)))
+        var result: WithdrawResult = try await send("/payments/withdraw/confirm", body: try encoder.encode(Request(signature: signature, stateToken: stateToken)))
+        var polls = 0
+        while result.status == "PENDING", let id = result.withdrawId, polls < 12 {
+            try await Task.sleep(for: .seconds(5))
+            result = try await send("/payments/withdraw/status", query: [URLQueryItem(name: "withdraw_id", value: id)])
+            polls += 1
+        }
+        return result
     }
 }
